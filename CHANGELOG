@@ -1,0 +1,113 @@
+# GenAI Evidence Hub Paper Screener — Changelog
+
+Compiled from Claude chat history. Dates reflect when each chat session took place.
+
+---
+
+## v1–v16 — Initial build
+**2026-08-12** · *Chat: "Meta-analysis paper screening automation tool"*
+
+Built from scratch across 15+ rapid iterations in a single session:
+
+- Core tkinter GUI with four tabs: Single Paper, Batch Upload, Repository, Settings
+- Anthropic API integration (Claude Opus) — PDFs submitted as native documents
+- JSON + CSV dual repository storage
+- Three-criterion screening logic (GenAI Evidence Hub's original hardcoded criteria)
+- Batch CSV processing with stop/resume, live per-paper and total elapsed timers
+- Automatic metadata extraction from PDFs (title, authors, year, DOI, journal, abstract)
+- Paper ID established as the only manually-entered field
+- Repository sorted ascending by `paper_id`; duplicate `paper_id` entries overwrite rather than append
+- Inclusion cutoff set to 2023 or later
+- Added "Unknown" domain as a last-resort fallback
+- Criterion 3 expanded (per SME guidance) to weight actual student outcomes (RCTs, learning gains, effect sizes) equally with direct output metrics
+- Automated Item Scoring domain updated to include "sometimes synthetic work"
+- **Bug fix:** moved `overall_recommendation` to the *last* field in the JSON output schema — previously the model committed to a verdict before reasoning through criteria, then self-corrected in notes; ordering the schema so the verdict comes last forces full analysis first
+- **Backend simplification:** removed Ollama/local model support entirely (too slow) — API-only from this point on
+- Removed unused imports (`pdfplumber`, `io`) and dead code (`InterruptedError` handler, `if False` branch, duplicate sort key logic, unused palette keys)
+- Established standing rule: README must be updated alongside every application change
+
+---
+
+## v17 — Configurable criteria + automated PDF retrieval
+**2026-08-12** · *Chat: "Customizable inclusion criteria and automated PDF scraping"*
+
+Files: `app_v17.py`, `criteria_profiles.py` (new), `pdf_resolver.py` (new), `README.md`, `requirements.txt`
+
+- Replaced hardcoded screening logic with a **criteria profile** architecture — inclusion/exclusion rules, prompt rendering, decision logic, CSV shape, and output schema all derive from a structured JSON profile
+- Built compiler flow: raw text → Claude-compiled draft → **mandatory human review** before use
+- Validator architecturally enforces that every criterion must carry `exclude_if` conditions before it can be saved (guards against the known false-INCLUDE failure mode from free-text criteria)
+- Built-in profile encodes the original three GenAI Evidence Hub criteria exactly
+- Profile versioning **forks rather than overwrites** when a profile is edited after use
+- Added a local decision-rule engine that recomputes recommendations post-API-call, preventing model drift from silently affecting the repository
+- New PDF resolution waterfall: direct link → arXiv → Unpaywall → OpenAlex → Semantic Scholar → Europe PMC → `citation_pdf_url` scraping — with per-source toggles, session-level DOI caching, and rate limiting
+- Added abstract-only fallback mode (forces UNCLEAR verdicts on anything not explicitly stated, by design produces a higher `MANUAL_REVIEW` rate)
+- README and requirements rewritten from scratch to document the profile system, full schema reference, and troubleshooting for the two most likely failure modes
+
+---
+
+## v18 — Local file library & matching engine
+**2026-08-13** · *Chats: "Automated paper file mapping and review system" → "Dynamic paper file mapping and upload system"*
+
+Files: `app_v18.py`, `local_library.py` (new, ~900 lines), `criteria_profiles.py` (updated), `pdf_resolver.py` (unchanged), `requirements_v18.txt`, `README_v18.md`
+
+Built to solve locally-held papers with uninformative filenames (e.g. "Download (4).pdf") that can't be found by the open-access resolver.
+
+- **Design correction mid-session:** paper IDs are internal database identifiers with no relation to the paper itself — filename-based ID matching was scrapped. Matching instead reads file *contents* (DOIs, arXiv IDs, titles, author surnames) — filenames treated as the weakest possible signal
+- Tiered confidence system (HIGH/MEDIUM/LOW/NONE): only deterministic identifier matches auto-accept; fuzzy matches require a mandatory human confirmation dialog before any screening runs
+- Bijective assignment (one file per paper, one paper per file), greedy scored candidate matching
+- File-type support: PDF (`pypdf`), PPTX (OOXML parsing, zero new deps), DOCX, and non-PDF conversion via LibreOffice
+- New `extracted_text` screening basis added to `criteria_profiles.py` prompt builders
+- New "Local Files" tab: folder picker, optional drag-and-drop (`tkinterdnd2`), match tree, mandatory review dialog with per-file evidence and reassignment UI
+- Screening worker records `local_file` / `match_method` / `match_confidence` provenance columns in the repository
+- Batch CSV template gained optional `title`/`doi`/`authors`/`year` columns for paywalled papers with no resolvable URL
+- Design decisions (author-conflict demotion, DOI-match exemption from that demotion, 0.55 confidence floor, near-tie forcing manual review) reasoned through with SME input before coding
+- Fixture suite covering DOI matching, exact/fuzzy title disambiguation, near-identical sibling titles, equidistant fuzzy ambiguity, duplicate file detection, scanned PDFs, filename token boundaries, manual reassignment conflicts
+- GUI smoke-tested on Xvfb; caught a real bug (PDF header validation before API submission) and a test-harness bug (conservative toggle state leaking across test cases)
+- Added CLI diagnostic interface to `local_library.py`, correcting a false claim inherited from the v17 README
+
+---
+
+## v18 — Cleanup pass + `doi_utils.py` extraction
+**2026-08-13** · *Chat: "Code review for optimization and clarity"*
+
+- Static analysis (pyflakes, AST inspection) across all four Python files (~7,200 lines)
+- Removed dead variable `pdf_bytes` (assigned in four batch-worker branches, never read)
+- Removed pointless wrapper function `_clean_json`
+- **Consolidated duplicate DOI utilities:** `normalize_doi()`, `DOI_RE`, and related parsing logic had been copied verbatim between `pdf_resolver.py` and `local_library.py` — extracted into new shared `doi_utils.py` module (stdlib-only, no new dependencies), bringing the app from 4 files to 5
+- Updated module docstring and README file inventory accordingly
+
+---
+
+## v18 — Batch pipeline architectural correction
+**2026-08-13** · *Same chat: "Code review for optimization and clarity"*
+
+- **Bug identified by Melanie:** the "pre-flight" step ran *before* main analysis, so file mapping failed — it happened before the online retrieval that would have supplied the metadata needed to match files
+- **Fix:** eliminated the separate pre-flight step; folded everything into a single **Run Batch Analysis** pass per row with explicit source precedence:
+  1. Try the row's URL online first (always)
+  2. Fall back to CSV `file_path`, verified against known title/DOI — a mismatch forces `MANUAL_REVIEW` (logged) but the file still screens
+  3. Fall back to a confirmed local-library folder-scan match
+  4. Fall back to abstract-only, if enabled
+- Added `verify_file_identity()` to `local_library.py`, reusing existing `score_pair()` scoring/thresholds
+- Repurposed "Run Pre-flight" button/card into **"Scan Folder for Matches"** — now a standalone, optional lookup aid, not a gate in front of the batch run
+- Removed dead state: `_preflight` dict, `retrieval_cache/` directory logic, `cache_retrieved_pdfs` config field
+- Updated README flow diagram, source-precedence list, troubleshooting entries, and repository directory listing
+- Verified: clean compile + pyflakes across all five files; re-ran mismatch/match dry tests against the final file set
+- **Follow-up bug report:** one paper (ID 316) failed to map from a batch of otherwise-successful files; investigated via zip upload and filename encoding inspection
+
+---
+
+## v18 — `pypdf` dependency clarification
+**2026-08-14** · *Chat: "PDF analysis despite pypdf installation error"*
+
+- Investigated log message: *"file unreadable for verification (pypdf not installed == cannot read PDF text)"*
+- Clarified that `verify_file_identity()` and the actual screening pipeline are **intentionally decoupled**: screening sends raw PDF bytes to the Claude API directly (unchanged since v12, when `pdfplumber` was removed), while verification separately uses `pypdf` to cross-check local file content against known title/DOI
+- Identified the gap: without `pypdf`, verification degrades gracefully (treats unreadable files as "nothing to compare against") rather than failing loudly — meaning a genuinely mismatched file could pass through without triggering `MANUAL_REVIEW`
+- Confirmed `pypdf>=4.0.0` was already listed in `requirements_v18.txt` under "Local file library"; installing it closes the gap
+- No version bump — documentation/troubleshooting clarification only
+
+---
+
+## Notes on this changelog
+- v1–v15 are not individually documented — they were rapid, unlabeled iterations within the initial build session and only the cumulative v16 state was captured in chat history.
+- The one consistently untested path across versions is **live network retrieval** (PDF resolution waterfall), which can't be exercised from the build environment.
+- This changelog reflects what's recoverable from chat history as of 2026-09-10. If more recent v18 work isn't reflected here, it may be in a conversation not yet indexed.
