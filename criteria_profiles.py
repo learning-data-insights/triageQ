@@ -1,7 +1,7 @@
 """
 criteria_profiles.py
 ────────────────────────────────────────────────────────────────────────────────
-Configurable screening criteria for the GenAI Evidence Hub Paper Screener.
+Configurable screening criteria for triageQ.
 
 A "criteria profile" is a structured JSON object that fully describes one
 review's inclusion/exclusion logic. The system prompt sent to Claude is
@@ -61,199 +61,32 @@ DEFAULT_CONFIDENCE_RULES = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# The built-in default profile — an exact encoding of the v16 hardcoded criteria
+# No profile ships built in. triageQ is criteria-agnostic by design: the first
+# thing a new install needs is a profile the user defines, either by pasting
+# raw criteria for the compiler to structure (see compile_criteria_with_claude
+# below) or by writing one directly to this schema. EMPTY_PROFILE exists only
+# as an in-memory placeholder the app can point to before that first profile
+# is created — it is never written to disk and can never be used to screen a
+# paper (validate_profile rejects it: zero criteria is invalid on purpose).
 # ══════════════════════════════════════════════════════════════════════════════
 
-DEFAULT_PROFILE = {
+EMPTY_PROFILE = {
     "schema_version": PROFILE_SCHEMA_VERSION,
-    "profile_id": "genai-evidence-hub",
-    "profile_name": "GenAI Evidence Hub",
-    "profile_version": "1.0",
-    "description": (
-        "A research initiative examining generative AI in educational assessment contexts."
-    ),
-    "created_at": "2025-01-01T00:00:00",
+    "profile_id": "",
+    "profile_name": "No criteria profile yet",
+    "profile_version": "0",
+    "description": "Create a profile to begin screening.",
+    "created_at": "",
     "locked": False,
     "builtin": True,
     "language_requirement": "English",
-    "min_publication_year": 2023,
+    "min_publication_year": None,
     "language_rule": DEFAULT_LANGUAGE_RULE,
     "confidence_rules": dict(DEFAULT_CONFIDENCE_RULES),
     "global_exclusions": [],
-    "criteria": [
-        {
-            "id": "genai_used",
-            "label": "GenAI Used",
-            "definition": "The primary AI system in the research must be a generative AI model.",
-            "include_if": [
-                "Research uses an LLM or generative model (GPT-3/4/4o, Claude, Gemini, LLaMA, "
-                "Mistral, DeepSeek, T5, BERT variants used generatively, etc.)",
-                "Ensemble models that combine a GenAI component with traditional ML",
-            ],
-            "exclude_if": [
-                "Research uses only traditional/discriminative ML (SVM, Random Forest, KNN, "
-                "logistic regression, XGBoost, CNN/RNN without a generative LLM component)",
-                "Research where GenAI is only mentioned in the literature review but not used",
-            ],
-            "notes": ["Must have been conducted after 2020"],
-            "required_for_include": True,
-        },
-        {
-            "id": "relevant_domain",
-            "label": "Relevant Assessment Domain",
-            "definition": (
-                "The research must directly perform one of the assessment tasks below using "
-                'GenAI. "Discusses" or "mentions" a domain is NOT sufficient — the GenAI '
-                "system must execute the task."
-            ),
-            "include_if": [],
-            "exclude_if": [
-                "Research task is AI detection / plagiarism detection",
-                "Research task is data annotation / labeling for training future models",
-                "Educational context is only background framing, not the actual study context",
-                "The paper addresses fairness analysis only, with no assessment task",
-            ],
-            "notes": [],
-            "required_for_include": True,
-            "tag_field": {
-                "name": "domains_identified",
-                "label": "Domains Identified",
-                "required": True,
-                "allowed_values": [
-                    "Automated Item Scoring",
-                    "Item Generation",
-                    "Formative Feedback",
-                    "Multimodal Inferences",
-                    "Unknown",
-                ],
-                "fallback_value": "Unknown",
-                "fallback_rule": (
-                    'Use "Unknown" ONLY when you are absolutely certain the paper does not fit '
-                    "any of the named categories. It is not a hedge — if there is a reasonable "
-                    "case for one of the named categories, use it."
-                ),
-            },
-            "categories": [
-                {
-                    "name": "Automated Item Scoring",
-                    "yes_if": [
-                        "GenAI assigns scores, grades, or ratings to student-produced work "
-                        "(sometimes synthetic work) — essays, short answers, code, drawings, "
-                        "simulations — that is typically scored by humans",
-                        "Includes holistic scoring, trait scoring, rubric-based scoring",
-                    ],
-                    "no_if": [
-                        "GenAI classifies, annotates, or labels text for NLP/ML pipeline "
-                        "purposes without the output being a score on student work",
-                        "GenAI detects whether text is AI-generated",
-                        "GenAI scores non-student content",
-                    ],
-                },
-                {
-                    "name": "Item Generation",
-                    "yes_if": [
-                        "GenAI directly generates assessment questions, test items, prompts, "
-                        "or rubrics",
-                        "Covers any item type: MCQ, short answer, essay prompts, simulation tasks",
-                    ],
-                    "no_if": [
-                        "GenAI generates other content (stories, summaries) not used as "
-                        "assessment items",
-                    ],
-                },
-                {
-                    "name": "Formative Feedback",
-                    "yes_if": [
-                        "GenAI generates feedback text delivered to students to improve their "
-                        "learning",
-                        "Feedback is tied to student work or responses, not just general content",
-                    ],
-                    "no_if": [
-                        "Paper evaluates whether humans can detect AI text",
-                        "Paper annotates data for future feedback systems",
-                        "Paper generates scoring labels without student-facing feedback",
-                    ],
-                },
-                {
-                    "name": "Multimodal Inferences",
-                    "yes_if": [
-                        "GenAI processes audio or video from classroom contexts to make "
-                        "assessment inferences",
-                        "Includes speech recognition, behavioral coding, engagement detection "
-                        "from A/V data",
-                    ],
-                    "no_if": [
-                        "Paper uses only text",
-                        "Multimodal data is not from a classroom/learning context",
-                    ],
-                },
-            ],
-        },
-        {
-            "id": "quality_assurance",
-            "label": "Quality Assurance",
-            "definition": (
-                "The paper must report quantitative evidence evaluating the GenAI system's "
-                "performance or impact."
-            ),
-            "include_if": [],
-            "include_if_groups": [
-                {
-                    "label": "PATH A — Direct output evaluation "
-                             "(metrics that evaluate GenAI outputs against a standard)",
-                    "items": [
-                        "Precision, Recall, F1-score (with baseline or comparison group)",
-                        "Accuracy vs. established benchmark or human raters",
-                        "Cohen's Kappa, Weighted Kappa, Quadratic Weighted Kappa (QWK)",
-                        "AUROC, BLEU, ROUGE, GLEU, BERTScore",
-                        "Pearson/Spearman correlation with human scores",
-                        "Agreement rates (exact, adjacent) compared to human rater agreement",
-                        "Human rater evaluation of GenAI output quality (Likert ratings, "
-                        "satisfaction scores)",
-                    ],
-                },
-                {
-                    "label": "PATH B — Outcome-based evidence "
-                             "(quantitative evidence of the GenAI system's real-world impact)",
-                    "items": [
-                        "Randomized controlled trials (RCTs) or quasi-experimental designs "
-                        "measuring student learning gains",
-                        "Pre/post comparisons of student performance attributable to the "
-                        "GenAI system",
-                        "Effect sizes (Cohen's d, partial eta-squared, etc.) from experiments "
-                        "comparing GenAI to a control",
-                        "Statistical tests (t-tests, ANOVA, regression) on learning outcomes "
-                        "where the GenAI is the intervention",
-                        "Engagement or behavioral metrics tied to GenAI use in a learning context",
-                    ],
-                },
-            ],
-            "groups_note": (
-                "The paths above are equally valid and independently sufficient. Actual student "
-                "learning outcomes are a valid and sufficient measure of GenAI system quality. "
-                "A well-designed RCT showing that AI-generated feedback improved student scores "
-                "satisfies this criterion."
-            ),
-            "exclude_if": [
-                "Paper only reports purely qualitative findings with no quantitative data",
-                "Paper describes a system without any empirical evaluation",
-                "All quantitative metrics are solely for a non-GenAI baseline with no "
-                "GenAI-specific results reported",
-                "Paper is a literature review or theoretical framework without empirical results",
-            ],
-            "notes": [],
-            "required_for_include": True,
-            "tag_field": {
-                "name": "metrics_identified",
-                "label": "Metrics Identified",
-                "required": False,
-                "allowed_values": [],
-                "fallback_value": "",
-                "fallback_rule": "",
-            },
-        },
-    ],
+    "criteria": [],
 }
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -271,18 +104,8 @@ def _profile_path(repo_dir: Path, profile_id: str) -> Path:
     return profiles_dir(repo_dir) / f"{safe}.json"
 
 
-def ensure_default_profile(repo_dir: Path) -> None:
-    """Write the built-in profile on first run. Never overwrites an edited copy."""
-    p = _profile_path(repo_dir, DEFAULT_PROFILE["profile_id"])
-    if not p.exists():
-        prof = json.loads(json.dumps(DEFAULT_PROFILE))
-        prof["created_at"] = datetime.datetime.now().isoformat(timespec="seconds")
-        p.write_text(json.dumps(prof, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
 def list_profiles(repo_dir: Path) -> list[dict]:
     """All profiles on disk, sorted by name. Corrupt files are skipped."""
-    ensure_default_profile(repo_dir)
     out = []
     for f in sorted(profiles_dir(repo_dir).glob("*.json")):
         try:

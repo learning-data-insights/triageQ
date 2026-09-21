@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 USER_AGENT = (
-    "GenAI-Evidence-Hub-Screener/1.0 (systematic review screening; "
+    "triageQ/1.0 (open-access PDF retrieval for content screening; "
     "mailto:{email}) python-requests"
 )
 

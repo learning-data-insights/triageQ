@@ -1,16 +1,22 @@
-# GenAI Evidence Hub — Paper Screener
+# triageQ
 
-A desktop tool for screening research papers for inclusion/exclusion in a systematic
-literature review. Built by Learning Data Insights, LLC.
+An open, human-in-the-loop tool for sorting large volumes of content against custom
+criteria. Licensed CC BY-SA 4.0.
 
-The tool returns an **INCLUDE / EXCLUDE / MANUAL_REVIEW** recommendation for each paper,
-with per-criterion verdicts, supporting evidence quoted from the paper, and a confidence
-level. It is a screening assistant for human reviewers, not a replacement for them.
+This reference build screens academic papers, returning an **INCLUDE / EXCLUDE /
+MANUAL_REVIEW** recommendation for each one, with per-criterion verdicts, supporting
+evidence quoted from the paper, and a confidence level. It is a screening assistant for
+human reviewers, not a replacement for them — every recommendation is meant to be worked
+through by a person, not acted on automatically.
 
-**Version 18** adds a local file library: point the tool at a folder of papers you already
-hold and it works out which paper each file belongs to, filling in only the rows online
-retrieval could not reach. Version 17 made criteria configurable per review and added
-automatic PDF retrieval from links and DOIs.
+triageQ ships with **no criteria of its own**. The first thing any install needs is a
+criteria profile — see [Screening criteria](#screening-criteria) to create one, or
+[Getting started: your first profile](#getting-started-your-first-profile) for a worked
+example.
+
+> This application was developed with AI assistance (Claude Sonnet 5). It is experimental
+> software intended for initial triage only; recommendations should be verified by a human
+> reviewer. The same notice is available in-app under **Settings → About**.
 
 ---
 
@@ -20,6 +26,7 @@ automatic PDF retrieval from links and DOIs.
 - [Setup](#setup)
 - [First-time configuration](#first-time-configuration)
 - [Screening criteria](#screening-criteria)
+- [Getting started: your first profile](#getting-started-your-first-profile)
 - [PDF retrieval](#pdf-retrieval)
 - [Local file library](#local-file-library)
 - [Screening a single paper](#screening-a-single-paper)
@@ -28,7 +35,6 @@ automatic PDF retrieval from links and DOIs.
 - [Decision rules](#decision-rules)
 - [Confidence levels](#confidence-levels)
 - [Output fields](#output-fields)
-- [The built-in GenAI Evidence Hub profile](#the-built-in-genai-evidence-hub-profile)
 - [Criteria profile schema reference](#criteria-profile-schema-reference)
 - [Troubleshooting](#troubleshooting)
 
@@ -40,16 +46,15 @@ The application is five Python files that must live in the same folder:
 
 | File | Contains |
 |------|----------|
-| `app_v18.py` | GUI, orchestration, repository management. This is what you run. |
+| `app.py` | GUI, orchestration, repository management. This is what you run. |
 | `criteria_profiles.py` | Profile schema, validation, prompt rendering, the criteria compiler, decision-rule engine |
 | `pdf_resolver.py` | The online PDF resolution waterfall and abstract-only metadata fallback |
 | `local_library.py` | Local file fingerprinting and file-to-paper matching |
 | `doi_utils.py` | DOI parsing shared by `pdf_resolver.py` and `local_library.py` |
 
 `pdf_resolver.py` and `local_library.py` can also be run directly from the command line for
-testing — see [Troubleshooting](#troubleshooting). (`criteria_profiles.py` has no CLI; the
-v17 README said otherwise, which was never accurate.) `doi_utils.py` has no CLI of its own —
-it's a small shared dependency, not a tool you run.
+testing — see [Troubleshooting](#troubleshooting). `criteria_profiles.py` and `doi_utils.py`
+have no CLI of their own; they're shared dependencies, not tools you run.
 
 ---
 
@@ -95,28 +100,27 @@ on your machine, so you never have to guess whether a capability is available.
 ### 2. Run the application
 
 ```bash
-python app_v18.py
+python app.py
 ```
-
-If you prefer the shorter `python app.py`, rename the file. The other four modules are
-imported by name and must keep their filenames.
 
 ---
 
 ## First-time configuration
 
-1. Open the **Settings** tab (it scrolls — there are four cards)
+1. Open the **Settings** tab (it scrolls — there are several cards)
 2. Paste your **Anthropic API key** (`sk-ant-...`) in the API Key card
-3. In the **PDF Retrieval** card, enter a **contact email**. Unpaywall requires one and
-   OpenAlex uses it to give you faster responses. Any real address you own is fine.
-4. Optionally click **Change** in the Repository card to set a custom save location
+3. In **Screening Criteria**, create or import your first profile — triageQ ships with none.
+   See [Screening criteria](#screening-criteria) below
+4. In the **PDF Retrieval** card, enter a **contact email**. Unpaywall requires one and
+   OpenAlex uses it to give you faster responses. Any real address you own is fine
+5. Optionally click **Change** in the Repository card to set a custom save location
 
 **Model:** `claude-opus-4-8`
 **Cost:** ~$0.01–0.03 per paper · 200 papers ≈ $4–6 total
 
 ### What persists between sessions
 
-Settings are saved to `~/.genai_evidence_hub_settings.json`:
+Settings are saved to `~/.triageq_settings.json`:
 
 - Repository location
 - Active criteria profile
@@ -134,8 +138,10 @@ definition of its criteria, boundary rules, decision logic, and output shape. Th
 prompt, the JSON schema Claude returns, the repository columns, and the decision rules are
 all generated from the active profile.
 
-The tool ships with the **GenAI Evidence Hub** profile, which encodes the original three
-criteria exactly. It is the default and cannot be deleted (duplicate it to make changes).
+triageQ ships with **no profile of its own**. Every review's criteria are something you
+define — from scratch, from an existing protocol, or imported from a colleague. Until a
+profile exists, the app shows "No criteria profile yet" in the header and the Analyze /
+Run Batch Analysis buttons refuse to run, with a message pointing you back here.
 
 Manage profiles in **Settings → Screening Criteria**. The active profile is shown in the
 window header, on the Single Paper tab, and on the Batch Upload tab, so you always know
@@ -202,6 +208,39 @@ in the results panel.
 
 The prompt still states the rules — this is a second line of defense so the repository does
 not depend on the model applying them correctly.
+
+---
+
+## Getting started: your first profile
+
+A minimal worked example, to make the abstract description above concrete. Say you're
+screening papers for a review on remote-work productivity tools, and your protocol says:
+"include studies that measure the effect of a specific software tool on individual output,
+using a quantitative outcome measure."
+
+1. In **Settings → Screening Criteria**, click **New from Text…**
+2. Paste something like:
+
+   > Include peer-reviewed studies that evaluate a named remote-work or collaboration
+   > software tool's effect on individual employee output, using a quantitative outcome
+   > measure (task completion rate, output volume, self-reported productivity score, etc.).
+   > Exclude studies about workplace policy (e.g. hybrid schedules) with no specific tool
+   > involved, studies with only qualitative or perception-based outcomes, and vendor
+   > white papers.
+
+3. Click **Compile with Claude**. It returns a structured draft — likely two criteria
+   ("Named Tool Evaluated" and "Quantitative Outcome Measure") — each with explicit
+   `include_if` and `exclude_if` conditions, plus a list of **compiler notes**: exclusion
+   rules it inferred that weren't in your original text (for example, excluding studies
+   where the tool is mentioned but not actually evaluated).
+4. Read the compiler notes. They're the rules you didn't write, and they'll shape every
+   screening decision from here on. Edit anything that doesn't match your intent.
+5. Click **Save and Activate**. The profile now appears in the header and both screening
+   tabs, and you're ready to analyze papers against it.
+
+This same flow works for any domain the tool is pointed at — the criteria above are just
+an example, not a preset. See [Criteria profile schema reference](#criteria-profile-schema-reference)
+if you'd rather hand-write or script a profile instead of compiling one from prose.
 
 ---
 
@@ -522,17 +561,16 @@ are handled without failing the paper.
 
 ## Repository
 
-Default location `~/genai_evidence_hub/`:
+Default location `~/triageq/`:
 
 ```
-~/genai_evidence_hub/
+~/triageq/
   paper_repository.json              ← Full data including complete Claude analysis
   paper_repository.csv               ← All papers, base columns + criteria_summary
   repository_<profile_id>.csv        ← One per profile, with that profile's criteria columns
   batch_template.csv                 ← Template for batch uploads
   file_mapping_log.csv               ← Audit trail of local file → paper assignments
   criteria_profiles/
-    genai-evidence-hub.json          ← The built-in profile
     <your-profile-id>.json           ← Profiles you create or import
 ```
 
@@ -540,7 +578,7 @@ Default location `~/genai_evidence_hub/`:
 
 Different profiles have different criteria, so a single flat file across all profiles would
 be mostly empty cells. `paper_repository.csv` carries the columns every paper has plus a
-compact `criteria_summary` (`genai_used=YES; relevant_domain=YES; …`). Each
+compact `criteria_summary` (`tool_evaluated=YES; quantitative_outcome=YES; …`). Each
 `repository_<profile_id>.csv` carries that profile's full criteria columns and is the file
 to use for analysis of a single review.
 
@@ -550,8 +588,8 @@ Both are rewritten from the JSON on every save. The JSON is the source of truth.
 
 - Sorted by Paper ID ascending (numerically when IDs are numbers, alphabetically otherwise)
 - Re-analyzing a paper with the same Paper ID overwrites the previous result — no duplicates
-- Records created before v17 are automatically attributed to the built-in profile v1.0 with
-  `screening_basis: full_text` when loaded
+- Records with no profile stamp (e.g. carried over from a much older repository) are marked
+  `profile_id: unknown` rather than attributed to any specific profile
 - Changing the repository location initializes the new folder automatically; papers in the
   old location are not moved
 
@@ -633,78 +671,13 @@ the abstract.
 One column per criterion holding its verdict (YES / NO / UNCLEAR), named after the criterion
 `id`, plus one column per tag field.
 
-For the built-in GenAI Evidence Hub profile that means: `genai_used`, `relevant_domain`,
-`domains_identified`, `quality_assurance`, `metrics_identified` — the same columns v16
-produced.
+For example, a profile with criteria `tool_evaluated` and `outcome_measure` (the latter with
+a `measure_type` tag field) would produce exactly those column names in the CSV and JSON
+output — whatever criteria your profile defines, its `id`s and `tag_field` names become the
+columns.
 
 The full JSON record additionally holds each criterion's `reasoning`, `text_examples`
 (quoted evidence), and `location` (page or section reference).
-
----
-
-## The built-in GenAI Evidence Hub profile
-
-This is the default profile, provided as a working example as much as a working review.
-
-### Criterion 1: GenAI Used
-
-The primary AI system must be a generative model (GPT-3/4/4o, Claude, Gemini, LLaMA,
-Mistral, DeepSeek, T5, BERT variants used generatively). Ensembles combining a GenAI
-component with traditional ML qualify.
-
-Excluded: traditional/discriminative ML only (SVM, Random Forest, KNN, logistic regression,
-XGBoost, CNN/RNN with no generative component); GenAI mentioned in the literature review but
-not used.
-
-### Criterion 2: Relevant Assessment Domain
-
-The GenAI system must directly *perform* one of four tasks. Discussing or mentioning a
-domain is not sufficient. `domains_identified` is required — every paper gets at least one
-value.
-
-| Domain | YES if |
-|--------|--------|
-| **Automated Item Scoring** | GenAI assigns scores, grades, or ratings to student-produced work (sometimes synthetic) — essays, short answers, code, drawings, simulations — of a kind typically scored by humans. Holistic, trait, and rubric-based scoring all count. |
-| **Item Generation** | GenAI directly generates assessment questions, test items, prompts, or rubrics. Any item type. |
-| **Formative Feedback** | GenAI generates feedback text delivered to students to improve learning, tied to their work or responses. |
-| **Multimodal Inferences** | GenAI processes classroom audio or video to make assessment inferences — speech recognition, behavioral coding, engagement detection. |
-| **Unknown** | Last resort only. Use when certain the paper fits none of the four — not as a hedge. |
-
-Cross-cutting exclusions: AI detection, plagiarism detection, data annotation/labeling for
-training future models, educational context as background framing only, fairness-only
-analyses with no assessment task.
-
-### Criterion 3: Quality Assurance
-
-Quantitative evidence evaluating the GenAI system's performance or impact. Two equally valid
-and independently sufficient paths:
-
-**Path A — Direct output evaluation.** Precision/Recall/F1 with a baseline, accuracy against
-a benchmark or human raters, Cohen's/Weighted/Quadratic Weighted Kappa, AUROC, BLEU, ROUGE,
-GLEU, BERTScore, Pearson/Spearman correlation with human scores, agreement rates compared to
-human rater agreement, human rater evaluation of output quality.
-
-**Path B — Outcome-based evidence.** RCTs or quasi-experimental designs measuring learning
-gains, pre/post comparisons, effect sizes (Cohen's *d*, partial eta-squared), statistical
-tests on learning outcomes where the GenAI is the intervention, engagement or behavioral
-metrics tied to GenAI use.
-
-A well-designed RCT showing AI-generated feedback improved student scores satisfies this
-criterion on its own.
-
-Excluded: purely qualitative findings, system descriptions with no empirical evaluation,
-quantitative metrics that apply only to a non-GenAI baseline, literature reviews and
-theoretical frameworks with no empirical results.
-
-### Other settings
-
-- **Minimum publication year:** 2023
-- **Language:** English
-- **Reasoning language rule:** all `reasoning`, `text_examples`, `key_decision_factors`, and
-  `additional_notes` fields contain only verifiable facts from the paper — model names, task
-  descriptions, reported metrics, dataset names, sample sizes, direct quotes. Evaluative
-  language ("well-documented", "high-quality", "impressive", "thorough") is prohibited.
-  Describe what the paper does, not how good it is.
 
 ---
 

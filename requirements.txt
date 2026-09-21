@@ -1,0 +1,31 @@
+# triageQ (v1.0.0)
+#
+#   pip install -r requirements.txt
+
+# ── Core ──────────────────────────────────────────────────────────────────────
+anthropic>=0.40.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# ── Local file library ────────────────────────────────────────────────────────
+# pypdf        reads the first pages of a local PDF to pull its title, authors,
+#              and DOI for matching. Screening still sends the original bytes.
+# python-pptx  reads PowerPoint decks (.pptx / .pptm).
+pypdf>=4.0.0
+python-pptx>=0.6.23
+
+# ── Optional ──────────────────────────────────────────────────────────────────
+# Drag-and-drop onto the Batch tab. Without it the drop zone becomes a label
+# and the Browse… button does the same job.
+tkinterdnd2>=0.3.0
+
+# NOT a pip package: LibreOffice.
+#   Needed to convert PowerPoint to PDF (keeps figures and charts, which text
+#   extraction drops) and to open legacy binary .ppt at all. Without it, .pptx
+#   decks fall back to text extraction and .ppt files are reported unreadable.
+#
+#   macOS    brew install --cask libreoffice
+#   Windows  https://www.libreoffice.org/download/
+#   Linux    sudo apt install libreoffice
+#
+# Settings → Local File Library shows which of these are actually present.
