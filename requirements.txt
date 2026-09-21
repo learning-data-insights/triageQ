@@ -1,15 +1,25 @@
-# triageQ (v1.0.0)
+# triageQ (v1.1.0)
 #
 #   pip install -r requirements.txt
 
 # ── Core ──────────────────────────────────────────────────────────────────────
-anthropic>=0.40.0
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 
+# ── Model provider (install what you plan to use — see model_providers.py) ────
+# anthropic  needed for the Anthropic (Claude) provider
+# openai     needed for the OpenAI provider AND the OpenAI-compatible provider
+#            (local models, self-hosted servers, any /chat/completions endpoint)
+# Only used lazily by the provider you actually select in Settings, so it's
+# fine to install just one — but leaving both in is harmless and simplest if
+# you might switch later.
+anthropic>=0.40.0
+openai>=1.0.0
+
 # ── Local file library ────────────────────────────────────────────────────────
 # pypdf        reads the first pages of a local PDF to pull its title, authors,
-#              and DOI for matching. Screening still sends the original bytes.
+#              and DOI for matching, and (for text-only providers) extracts the
+#              full text sent for screening in place of native PDF vision.
 # python-pptx  reads PowerPoint decks (.pptx / .pptm).
 pypdf>=4.0.0
 python-pptx>=0.6.23

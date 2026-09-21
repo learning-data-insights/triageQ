@@ -4,7 +4,7 @@ criteria_profiles.py
 Configurable screening criteria for triageQ.
 
 A "criteria profile" is a structured JSON object that fully describes one
-review's inclusion/exclusion logic. The system prompt sent to Claude is
+review's inclusion/exclusion logic. The system prompt sent to the model is
 RENDERED from the profile — nothing about the criteria is hardcoded in the app.
 
 Two layers, by design:
@@ -15,7 +15,7 @@ Two layers, by design:
                             boundaries, reviewed and approved by a human before
                             it is ever used to screen a paper.
 
-The compiler (compile_criteria_with_claude) turns Layer 1 into a draft of
+The compiler (compile_criteria) turns Layer 1 into a draft of
 Layer 2. The human review step is not optional — free-text criteria without
 explicit boundary rules are the known cause of false INCLUDEs.
 
@@ -63,7 +63,7 @@ DEFAULT_CONFIDENCE_RULES = {
 # ══════════════════════════════════════════════════════════════════════════════
 # No profile ships built in. triageQ is criteria-agnostic by design: the first
 # thing a new install needs is a profile the user defines, either by pasting
-# raw criteria for the compiler to structure (see compile_criteria_with_claude
+# raw criteria for the compiler to structure (see compile_criteria
 # below) or by writing one directly to this schema. EMPTY_PROFILE exists only
 # as an in-memory placeholder the app can point to before that first profile
 # is created — it is never written to disk and can never be used to screen a
@@ -323,7 +323,7 @@ def profile_csv_columns(profile: dict, base_columns: list[str]) -> list[str]:
 
 
 def example_output_json(profile: dict) -> str:
-    """The JSON skeleton shown to Claude, derived from the profile."""
+    """The JSON skeleton shown to the model, derived from the profile."""
     crit_block = {}
     for c in profile.get("criteria", []):
         block = {
@@ -729,25 +729,22 @@ def clean_json_response(raw: str) -> dict:
     return obj
 
 
-def compile_criteria_with_claude(raw_text: str, api_key: str, model: str,
-                                 progress=None) -> tuple[dict, list[str]]:
+def compile_criteria(raw_text: str, provider_cfg: "mp.ProviderConfig",
+                     progress=None) -> tuple[dict, list[str]]:
     """Turn raw criteria text into a draft profile. Returns (profile, compiler_notes).
 
-    The returned profile is a DRAFT. It must be reviewed by a human before use.
+    Works with any configured provider — the compiler prompt is plain text,
+    same as the screening prompt. The returned profile is a DRAFT. It must be
+    reviewed by a human before use.
     """
-    import anthropic  # imported lazily so this module stays importable without the SDK
+    import model_providers as mp_  # local import avoids a module-load-order dependency
 
+    provider = mp_.build_provider(provider_cfg)
     if progress:
-        progress("Compiling criteria with Claude…")
+        progress(f"Compiling criteria with {provider.display_name}…")
 
-    client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=model,
-        max_tokens=8000,
-        system=COMPILER_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": build_compile_user_message(raw_text)}],
-    )
-    text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+    text = provider.complete(
+        COMPILER_SYSTEM_PROMPT, build_compile_user_message(raw_text), max_tokens=8000)
     draft = clean_json_response(text)
 
     notes = draft.pop("compiler_notes", []) or []

@@ -1,5 +1,5 @@
 """
-triageQ  (v1.0.0)
+triageQ  (v1.2.1)
 
 An open, human-in-the-loop tool for sorting large volumes of content against
 custom criteria. triageQ ships with no built-in criteria of its own — every
@@ -7,7 +7,6 @@ install starts by defining or importing a criteria profile, then screens
 papers (or other documents) against it, producing INCLUDE / EXCLUDE /
 MANUAL_REVIEW recommendations with transparent, reviewable reasoning. It does
 not make final decisions — that stays with the person working the queue.
-Backend: Anthropic API (Claude) only.
 
 CAPABILITIES
 ────────────
@@ -62,12 +61,31 @@ CAPABILITIES
    confirmed folder-scan match is the next fallback after that. There is no
    separate pre-flight step — this all happens in one pass.
 
+5. PLUGGABLE MODEL PROVIDER
+   Anthropic, OpenAI, or any OpenAI-compatible /chat/completions endpoint —
+   a self-hosted server (vLLM, llama.cpp, LM Studio, Ollama's OpenAI shim) or
+   a hosted aggregator (see model_providers.py). Configured in Settings; API
+   keys are per-provider and never written to disk.
+
+   Only Anthropic and OpenAI can read a PDF natively ("PDF vision" — the
+   model sees the paper's own layout, figures, and tables). Every other
+   OpenAI-compatible endpoint is treated as text-only, since there is no
+   reliable standard for PDF input across third-party servers: triageQ
+   extracts the PDF's text locally (via pypdf) and screens from that instead.
+   Which happened is recorded per record, in the pdf_vision_used repository
+   column — never silently absorbed into screening_basis, which already
+   means something else (how much of the paper was available, not how the
+   available part reached the model).
+
 FILES
    app.py                 this file — GUI and orchestration
    criteria_profiles.py   profile schema, prompt rendering, criteria compiler
    pdf_resolver.py        PDF resolution waterfall (online)
    local_library.py       local file fingerprinting and paper-ID matching
    doi_utils.py           DOI parsing shared by pdf_resolver.py and local_library.py
+   model_providers.py     Anthropic / OpenAI / OpenAI-compatible provider adapters
+   branding.py            palette, bundled Inter font loading, asset paths
+   fonts/, assets/        bundled Inter font files and logo/icon images
 
 See CHANGELOG.md for full version history, and the About section under
 Settings for the AI-disclosure and license notice.
@@ -84,12 +102,13 @@ import datetime
 import base64
 import re
 import shutil
-import anthropic
 from pathlib import Path
 
 import criteria_profiles as cp
 import pdf_resolver as pr
 import local_library as lib
+import model_providers as mp
+import branding
 
 # Drag-and-drop is optional. tkinterdnd2 ships the tkdnd Tcl extension; without
 # it every drop target degrades to a "Select Folder…" button and the UI says so
@@ -105,7 +124,7 @@ except Exception:                                    # pragma: no cover
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 APP_TITLE = "triageQ"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.2.1"
 SETTINGS_FILE = Path.home() / ".triageq_settings.json"
 
 REPO_DIR = Path.home() / "triageq"
@@ -125,39 +144,72 @@ def set_repo_dir(new_dir: Path):
     MAPPING_LOG_CSV = REPO_DIR / "file_mapping_log.csv"
 
 
-CLAUDE_MODEL = "claude-opus-4-8"
+DEFAULT_MODELS = {
+    "anthropic": "claude-opus-4-8",
+    "openai": "",
+    "openai_compatible": "",
+}
 
+# Resolved to "Inter" (or a close system fallback) once a Tk root exists —
+# see PaperScreenerApp.__init__, which calls branding.resolve_font_family()
+# and overwrites this before building any widgets. The literal here only
+# matters for the brief window before that happens.
+FONT_FAMILY = "Helvetica"
+
+# Brand palette — colors sampled directly from the reference brand sheet.
+# Verdict colors (include/exclude/manual, right below) intentionally keep
+# their existing stoplight meaning rather than being remapped to brand hues;
+# everything else in this dict now uses the actual brand palette.
 PALETTE = {
     # Surfaces
-    "bg":           "#F6F5F3",
+    "bg":           "#F7F8FA",
     "surface":      "#FFFFFF",
-    "surface_dim":  "#EFEDE9",
-    "border":       "#E0DED9",
+    "surface_dim":  "#EEF1F5",
+    "border":       "#DDE3EA",
     # Type
-    "ink":          "#18181A",
-    "ink_mid":      "#52524E",
-    "ink_faint":    "#96948E",
-    # Brand / header
-    "brand":        "#18181A",
-    "brand_accent": "#C4984A",
-    # Actions
-    "action":       "#18181A",
+    "ink":          "#1B2733",
+    "ink_mid":      "#4B5A6B",
+    "ink_faint":    "#8B97A6",
+    # Brand / header — Deep Blue chrome, Amber accent (the same role the old
+    # gold accent played: legible text/fills against the dark brand bars
+    # used across every dialog header, and the selected-tab / progress fill).
+    "brand":        branding.DEEP_BLUE,
+    "brand_accent": branding.AMBER,
+    "header_bg":    "#FFFFFF",   # the main app header specifically — see
+                                 # _build_ui: the wordmark logo's own text is
+                                 # dark navy, so it needs a light background,
+                                 # unlike the plain-text dark bars elsewhere.
+    # Actions — Brand Blue for primary buttons ("focus, clarity,
+    # approachability" is a fitting description of a call-to-action).
+    "action":       branding.BRAND_BLUE,
     "action_text":  "#FFFFFF",
-    "action_sec":   "#ECEAE5",
-    "action_sec_t": "#18181A",
-    # Signals
+    "action_sec":   "#EEF1F5",
+    "action_sec_t": branding.DEEP_BLUE,
+    # Signals — stoplight, deliberately UNCHANGED. INCLUDE/EXCLUDE/
+    # MANUAL_REVIEW need to read as green/red/amber at a glance regardless
+    # of brand palette; remapping these to Teal/Lavender would trade away
+    # that instant legibility for palette purity, which isn't a good trade.
     "include":      "#1A6B45",
     "include_bg":   "#EAF5EE",
     "exclude":      "#B03030",
     "exclude_bg":   "#FAECEC",
     "manual":       "#8C6200",
     "manual_bg":    "#FDF4E3",
-    # Console
-    "console_bg":   "#111111",
-    "console_fg":   "#D0CEC8",
+    # Nuance / human-judgment callouts — Lavender, deliberately distinct from
+    # the verdict amber above even though both land in similar territory.
+    # Used for things that ask for a person's judgment without being a
+    # paper's verdict — the criteria-compiler's "read these" notes banner,
+    # specifically.
+    "nuance":       "#5B4E8A",
+    "nuance_bg":    "#F1EEF9",
+    # Console — Teal for informational tags ("balance, open-mindedness" fits
+    # a neutral status note better than the old gold, which is now Amber's
+    # job above).
+    "console_bg":   "#1B2733",
+    "console_fg":   "#D7DCE3",
     "console_ok":   "#4DC98A",
     "console_err":  "#E06060",
-    "console_info": "#C4984A",
+    "console_info": branding.TEAL,
     "console_key":  "#78BFDA",
 }
 
@@ -171,7 +223,7 @@ CSV_BASE_COLUMNS = [
     "profile_id", "profile_version", "screening_basis",
     "pdf_source", "pdf_url",
     "file_match_method", "file_match_score", "source_file_type",
-    "analyzed_at", "model_used",
+    "analyzed_at", "model_used", "pdf_vision_used",
 ]
 
 # title and doi are optional, but they are what makes content matching possible
@@ -179,12 +231,15 @@ CSV_BASE_COLUMNS = [
 BATCH_CSV_COLUMNS = ["paper_id", "url", "file_path", "title", "doi"]
 
 
-# ── App settings (persisted; never contains the API key) ──────────────────────
+# ── App settings (persisted; API keys never included) ──────────────────────
 
 DEFAULT_SETTINGS = {
     "repo_dir": str(Path.home() / "triageq"),
     "active_profile_id": "",
     "abstract_only_fallback": False,
+    "provider": "anthropic",
+    "provider_models": dict(DEFAULT_MODELS),
+    "openai_compatible_base_url": "",
     "resolver": pr.ResolverConfig().to_dict(),
     "library": lib.LibraryConfig().to_dict(),
 }
@@ -257,6 +312,7 @@ def _migrate_entry(r: dict) -> dict:
     r.setdefault("file_match_method", "")
     r.setdefault("file_match_score", "")
     r.setdefault("source_file_type", "pdf")
+    r.setdefault("pdf_vision_used", "")
     return r
 
 
@@ -267,6 +323,32 @@ def _pid_sort_key(r: dict):
         return (0, int(pid))
     except (ValueError, TypeError):
         return (1, str(pid))
+
+
+def _friendly_save_error(exc: Exception) -> str:
+    """Turn the common 'file is open elsewhere' error into something actionable.
+
+    On Windows, a program that has a repository CSV open (Excel, most often)
+    holds an exclusive OS-level lock on it, so any other process's write fails
+    with PermissionError / [Errno 13]. That's almost always what this is —
+    name it, rather than surfacing the raw errno to someone who has no reason
+    to know what it means. The underlying result is not lost when this
+    happens: paper_repository.json is written before the CSV mirror is
+    regenerated, so only the CSV (and any per-profile CSV) is left stale until
+    the next successful save.
+    """
+    if isinstance(exc, PermissionError):
+        path = getattr(exc, "filename", "") or ""
+        name = Path(path).name if path else "a repository file"
+        if path and str(REPO_DIR) in str(path):
+            return (
+                f"Could not write {name} — it looks like the file is open in "
+                "another program (often Excel), which locks it against writes. "
+                "Close it and try again. Your analysis result itself was not "
+                "lost — it's saved in paper_repository.json; only the .csv "
+                "mirror is stale until the next successful save.")
+        return f"Permission denied writing {name}. Close any program that has it open and try again."
+    return str(exc)
 
 
 def save_to_repository(entry: dict):
@@ -336,7 +418,7 @@ def _criteria_summary(entry: dict) -> str:
 
 # ── Analysis ──────────────────────────────────────────────────────────────────
 
-def analyze_paper(payload, profile: dict, api_key: str,
+def analyze_paper(payload, profile: dict, provider_cfg: "mp.ProviderConfig",
                   screening_basis: str = "full_text",
                   progress_callback=None) -> dict:
     """Screen one paper against a criteria profile.
@@ -348,41 +430,46 @@ def analyze_paper(payload, profile: dict, api_key: str,
     converted to PDF arrives as bytes but is still basis="slides" — the prompt
     must reflect what the evidence is, not how it got here.
 
+    Which provider is used, and whether it read the PDF natively or from
+    locally-extracted text, are transport details — they don't change
+    screening_basis, which is about how MUCH of the paper was available, not
+    how the available part reached the model. That's tracked separately, on
+    the returned result's "_pdf_vision_used" key.
+
     Returns the parsed result dict, with overall_recommendation verified against
     the profile's decision rules locally.
     """
+    provider = mp.build_provider(provider_cfg)
+
     if progress_callback:
-        progress_callback({
-            "full_text": "Sending to Claude…",
+        label = {
+            "full_text": f"Sending to {provider.display_name}…",
             "abstract_only": "Screening from abstract…",
             "slides": "Screening from slides…",
-        }.get(screening_basis, "Sending to Claude…"))
+        }.get(screening_basis, f"Sending to {provider.display_name}…")
+        progress_callback(label)
 
-    client = anthropic.Anthropic(api_key=api_key)
     system_prompt = cp.build_system_prompt(profile, screening_basis)
     user_text = cp.build_user_message(profile, screening_basis)
 
+    pdf_bytes = None
+    pdf_vision_used = ""
     if isinstance(payload, (bytes, bytearray)):
-        pdf_b64 = base64.standard_b64encode(bytes(payload)).decode("utf-8")
-        content = [
-            {"type": "document",
-             "source": {"type": "base64",
-                        "media_type": "application/pdf",
-                        "data": pdf_b64}},
-            {"type": "text", "text": user_text},
-        ]
+        if provider.supports_pdf_vision:
+            pdf_bytes = bytes(payload)
+            pdf_vision_used = "yes"
+        else:
+            if progress_callback:
+                progress_callback(
+                    f"{provider.display_name} has no native PDF input — "
+                    "extracting text locally…")
+            user_text = mp.extract_pdf_text(bytes(payload)) + "\n\n" + user_text
+            pdf_vision_used = "no"
     else:
-        content = [{"type": "text", "text": str(payload)},
-                   {"type": "text", "text": user_text}]
+        user_text = str(payload) + "\n\n" + user_text
 
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=4096,
-        system=system_prompt,
-        messages=[{"role": "user", "content": content}],
-    )
-
-    text = "".join(b.text for b in response.content if getattr(b, "type", "") == "text")
+    text = provider.complete(system_prompt, user_text, pdf_bytes=pdf_bytes,
+                             max_tokens=4096)
     result = cp.clean_json_response(text)
 
     # Recompute the recommendation locally. The prompt states the rules, but the
@@ -393,6 +480,8 @@ def analyze_paper(payload, profile: dict, api_key: str,
         result["_local_correction"] = correction
 
     result["_screening_basis"] = screening_basis
+    result["_pdf_vision_used"] = pdf_vision_used
+    result["_provider_model"] = f"{provider.display_name}: {provider_cfg.model}"
     return result
 
 
@@ -402,10 +491,30 @@ class PaperScreenerApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
+
+        # Font must resolve before any widget below reads FONT_FAMILY, and
+        # needs a live root to query tkinter.font.families() against — so
+        # this comes first, before anything else.
+        global FONT_FAMILY
+        FONT_FAMILY = branding.resolve_font_family(self)
+
         self.title(APP_TITLE)
         self.geometry("1180x900")
         self.minsize(1000, 720)
         self.configure(bg=PALETTE["bg"])
+
+        # Window/taskbar icon. iconbitmap(.ico) only works on Windows;
+        # iconphoto is the cross-platform path. Neither failing should take
+        # the app down — a missing icon is cosmetic, not functional.
+        try:
+            self.iconbitmap(default=str(branding.ICON_ICO))
+        except Exception:
+            pass
+        try:
+            self._icon_img = tk.PhotoImage(file=str(branding.ICON_PNG_256))
+            self.iconphoto(True, self._icon_img)
+        except Exception:
+            pass
 
         # Settings
         self.settings = load_settings()
@@ -425,7 +534,21 @@ class PaperScreenerApp(tk.Tk):
             except Exception:
                 self._dnd_ready = False
 
-        self._api_key = tk.StringVar()
+        # Model provider — API keys are per-provider and in-memory only, never
+        # written to disk; provider choice and model names DO persist.
+        self._provider_var = tk.StringVar(value=self.settings.get("provider", "anthropic"))
+        self._provider_keys = {
+            "anthropic": tk.StringVar(),
+            "openai": tk.StringVar(),
+            "openai_compatible": tk.StringVar(),
+        }
+        models = self.settings.get("provider_models", {}) or {}
+        self._provider_models = {
+            name: tk.StringVar(value=models.get(name, default))
+            for name, default in DEFAULT_MODELS.items()
+        }
+        self._compat_base_url = tk.StringVar(
+            value=self.settings.get("openai_compatible_base_url", ""))
         self._current_pdf_bytes = None
         self._current_meta_text = None      # abstract-only payload, if used
         self._current_payload = None        # bytes or str actually sent
@@ -488,7 +611,7 @@ class PaperScreenerApp(tk.Tk):
                     background=PALETTE["bg"], borderwidth=0, tabmargins=[0, 0, 0, 0])
         s.configure("TNotebook.Tab",
                     background=PALETTE["bg"], foreground=PALETTE["ink_faint"],
-                    padding=[20, 10], font=("Helvetica", 9, "bold"),
+                    padding=[20, 10], font=(FONT_FAMILY, 9, "bold"),
                     borderwidth=0, relief="flat")
         s.map("TNotebook.Tab",
               background=[("selected", PALETTE["surface"])],
@@ -503,13 +626,13 @@ class PaperScreenerApp(tk.Tk):
                     borderwidth=0, thickness=3)
 
         s.configure("Repo.Treeview",
-                    rowheight=28, font=("Helvetica", 9),
+                    rowheight=28, font=(FONT_FAMILY, 9),
                     background=PALETTE["surface"],
                     fieldbackground=PALETTE["surface"],
                     foreground=PALETTE["ink"],
                     borderwidth=0, relief="flat")
         s.configure("Repo.Treeview.Heading",
-                    font=("Helvetica", 8, "bold"),
+                    font=(FONT_FAMILY, 8, "bold"),
                     background=PALETTE["surface_dim"],
                     foreground=PALETTE["ink_mid"],
                     borderwidth=0, relief="flat",
@@ -549,35 +672,59 @@ class PaperScreenerApp(tk.Tk):
         self._build_config_tab()
 
     def _build_header(self):
-        hdr = tk.Frame(self, bg=PALETTE["brand"], height=56)
+        hdr = tk.Frame(self, bg=PALETTE["header_bg"], height=80)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
+        # A thin brand-navy rule under the header separates it from the page
+        # without needing the header itself to be dark — the wordmark's own
+        # text is dark navy, so it needs a light background to read at all.
+        tk.Frame(self, bg=PALETTE["brand"], height=3).pack(fill="x")
 
-        left = tk.Frame(hdr, bg=PALETTE["brand"])
+        left = tk.Frame(hdr, bg=PALETTE["header_bg"])
         left.pack(side="left", padx=28, fill="y")
 
-        tk.Label(left, text="triageQ",
-                 font=("Georgia", 15, "bold"),
-                 fg=PALETTE["brand_accent"],
-                 bg=PALETTE["brand"]).pack(side="left", anchor="center")
+        try:
+            self._logo_img = tk.PhotoImage(file=str(branding.LOGO_PNG))
+            tk.Label(left, image=self._logo_img,
+                     bg=PALETTE["header_bg"]).pack(anchor="w", pady=(13, 0))
+        except Exception:
+            # Missing/unreadable asset shouldn't take the whole app down —
+            # fall back to a plain text wordmark.
+            tk.Label(left, text="triageQ",
+                     font=(FONT_FAMILY, 15, "bold"),
+                     fg=PALETTE["brand"],
+                     bg=PALETTE["header_bg"]).pack(anchor="w", pady=(13, 0))
 
-        tk.Label(left, text="  ·  sort content against custom criteria",
-                 font=("Helvetica", 11),
-                 fg="#6A6A60",
-                 bg=PALETTE["brand"]).pack(side="left", anchor="center")
+        # Below the logo, not beside it — the full brand-sheet tagline is
+        # long enough that keeping it on the logo's row would crowd out the
+        # profile/credit block on the right at the window's minimum width.
+        tk.Label(left,
+                 text="A Human-in-the-Loop Tool for Sorting Large Volumes of "
+                      "Content Against Custom Criteria",
+                 font=(FONT_FAMILY, 9),
+                 fg=PALETTE["ink_faint"],
+                 bg=PALETTE["header_bg"]).pack(anchor="w", pady=(2, 0))
 
-        right = tk.Frame(hdr, bg=PALETTE["brand"])
+        right = tk.Frame(hdr, bg=PALETTE["header_bg"])
         right.pack(side="right", padx=28, fill="y")
 
         self._header_profile_label = tk.Label(
-            right, text="", font=("Helvetica", 8, "bold"),
-            fg=PALETTE["brand_accent"], bg=PALETTE["brand"], anchor="e")
-        self._header_profile_label.pack(anchor="e", pady=(12, 0))
+            right, text="", font=(FONT_FAMILY, 8, "bold"),
+            fg=PALETTE["brand"], bg=PALETTE["header_bg"], anchor="e")
+        self._header_profile_label.pack(anchor="e", pady=(20, 0))
 
-        tk.Label(right, text="Learning Data Insights, LLC",
-                 font=("Helvetica", 8),
-                 fg="#4A4A44",
-                 bg=PALETTE["brand"]).pack(anchor="e")
+        credit = tk.Frame(right, bg=PALETTE["header_bg"])
+        credit.pack(anchor="e", pady=(2, 0))
+        try:
+            self._ldi_badge_img = tk.PhotoImage(file=str(branding.LDI_BADGE_28))
+            tk.Label(credit, image=self._ldi_badge_img,
+                     bg=PALETTE["header_bg"]).pack(side="left", padx=(0, 6))
+        except Exception:
+            pass
+        tk.Label(credit, text=f"Built by Learning Data Insights  ·  v{APP_VERSION}",
+                 font=(FONT_FAMILY, 8),
+                 fg=PALETTE["ink_faint"],
+                 bg=PALETTE["header_bg"]).pack(side="left")
 
     # ── Helpers: card and button factories ────────────────────────────────────
 
@@ -588,7 +735,7 @@ class PaperScreenerApp(tk.Tk):
         if label:
             tk.Label(outer, text=label.upper(),
                      bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                     font=("Helvetica", 7, "bold"),
+                     font=(FONT_FAMILY, 7, "bold"),
                      anchor="w").pack(fill="x", pady=(0, 4))
         card = tk.Frame(outer, bg=PALETTE["surface"],
                         highlightbackground=PALETTE["border"],
@@ -609,16 +756,23 @@ class PaperScreenerApp(tk.Tk):
         }
         bg, fg = cfg.get(style, cfg["primary"])
         kw = dict(text=text, command=command, bg=bg, fg=fg,
-                  font=("Helvetica", 9, "bold"), relief="flat",
+                  font=(FONT_FAMILY, 9, "bold"), relief="flat",
                   padx=padx, pady=pady, cursor="hand2",
                   activebackground=bg, activeforeground=fg,
+                  # Tk's own disabled-state default text color is a washed
+                  # gray that ignores fg entirely — on a colored button
+                  # (primary/danger) that reads as barely-legible. Keep the
+                  # same text color in both states; these buttons don't
+                  # change background when disabled either, so this is the
+                  # only signal that would otherwise break.
+                  disabledforeground=fg,
                   bd=0)
         if width:
             kw["width"] = width
         return tk.Button(parent, **kw)
 
     def _entry(self, parent, textvariable, width=None, show=None, dim=True):
-        kw = dict(textvariable=textvariable, font=("Helvetica", 9),
+        kw = dict(textvariable=textvariable, font=(FONT_FAMILY, 9),
                   bd=0, relief="flat",
                   bg=PALETTE["surface_dim"] if dim else PALETTE["surface"],
                   fg=PALETTE["ink"], insertbackground=PALETTE["ink"],
@@ -646,7 +800,7 @@ class PaperScreenerApp(tk.Tk):
         crit_row.pack(fill="x")
         self._single_profile_label = tk.Label(
             crit_row, text="", bg=PALETTE["surface"], fg=PALETTE["ink"],
-            font=("Helvetica", 10, "bold"), anchor="w")
+            font=(FONT_FAMILY, 10, "bold"), anchor="w")
         self._single_profile_label.pack(side="left")
         self._btn(crit_row, "Change", lambda: self.notebook.select(self.tab_config),
                   "ghost", padx=12, pady=3).pack(side="right")
@@ -658,7 +812,7 @@ class PaperScreenerApp(tk.Tk):
 
         self._paper_id_var = tk.StringVar()
         id_entry = tk.Entry(id_row, textvariable=self._paper_id_var,
-                            font=("Helvetica", 11), bd=0, relief="flat",
+                            font=(FONT_FAMILY, 11), bd=0, relief="flat",
                             bg=PALETTE["surface"], fg=PALETTE["ink"],
                             insertbackground=PALETTE["ink"],
                             highlightthickness=1,
@@ -668,7 +822,7 @@ class PaperScreenerApp(tk.Tk):
 
         tk.Label(id_row, text="All other metadata is extracted automatically from the PDF.",
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8, "italic")).pack(side="left")
+                 font=(FONT_FAMILY, 8, "italic")).pack(side="left")
 
         # ── Source card ──
         src_inner = self._card(f, label="Paper Source")
@@ -676,7 +830,7 @@ class PaperScreenerApp(tk.Tk):
         url_row = tk.Frame(src_inner, bg=PALETTE["surface"])
         url_row.pack(fill="x", pady=(0, 4))
         tk.Label(url_row, text="Link", bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
-                 font=("Helvetica", 8, "bold"), width=6, anchor="w").pack(side="left")
+                 font=(FONT_FAMILY, 8, "bold"), width=6, anchor="w").pack(side="left")
         self._url_var = tk.StringVar()
         url_entry = self._entry(url_row, self._url_var)
         url_entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(6, 10))
@@ -687,7 +841,7 @@ class PaperScreenerApp(tk.Tk):
                  text=("Accepts a DOI, a publisher or repository link, an arXiv id, or a "
                        "direct PDF URL. Open-access copies are located automatically."),
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8, "italic"), anchor="w",
+                 font=(FONT_FAMILY, 8, "italic"), anchor="w",
                  justify="left", wraplength=760).pack(fill="x", padx=(48, 0), pady=(0, 6))
 
         sep_row = tk.Frame(src_inner, bg=PALETTE["surface"])
@@ -695,7 +849,7 @@ class PaperScreenerApp(tk.Tk):
         tk.Frame(sep_row, bg=PALETTE["border"], height=1).pack(
             side="left", fill="x", expand=True)
         tk.Label(sep_row, text="  or  ", bg=PALETTE["surface"],
-                 fg=PALETTE["ink_faint"], font=("Helvetica", 8)).pack(side="left")
+                 fg=PALETTE["ink_faint"], font=(FONT_FAMILY, 8)).pack(side="left")
         tk.Frame(sep_row, bg=PALETTE["border"], height=1).pack(
             side="left", fill="x", expand=True)
 
@@ -705,7 +859,7 @@ class PaperScreenerApp(tk.Tk):
                   "secondary", padx=14, pady=5).pack(side="left")
         self._file_label = tk.Label(file_row, text="No file selected",
                                     bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                                    font=("Helvetica", 8, "italic"))
+                                    font=(FONT_FAMILY, 8, "italic"))
         self._file_label.pack(side="left", padx=12)
 
         # Resolution trail
@@ -730,7 +884,7 @@ class PaperScreenerApp(tk.Tk):
         prog_top.pack(fill="x")
         self._progress_label = tk.Label(
             prog_top, text="Ready.", bg=PALETTE["bg"],
-            fg=PALETTE["ink_faint"], font=("Helvetica", 8, "italic"), anchor="w")
+            fg=PALETTE["ink_faint"], font=(FONT_FAMILY, 8, "italic"), anchor="w")
         self._progress_label.pack(side="left", fill="x", expand=True)
         self._single_timer_label = tk.Label(
             prog_top, text="", bg=PALETTE["bg"],
@@ -750,7 +904,7 @@ class PaperScreenerApp(tk.Tk):
 
         tk.Label(res_outer, text="ANALYSIS RESULTS",
                  bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 7, "bold"), anchor="w").pack(fill="x", pady=(0, 4))
+                 font=(FONT_FAMILY, 7, "bold"), anchor="w").pack(fill="x", pady=(0, 4))
 
         res_card = tk.Frame(res_outer, bg=PALETTE["console_bg"],
                             highlightbackground=PALETTE["border"],
@@ -807,7 +961,7 @@ class PaperScreenerApp(tk.Tk):
 
         info_inner = self._card(f, label="Instructions")
         tk.Label(info_inner, bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
-                 font=("Helvetica", 9), justify="left", anchor="w",
+                 font=(FONT_FAMILY, 9), justify="left", anchor="w",
                  text=(
                      "Upload a CSV with one paper per row.\n"
                      "Required column: paper_id\n"
@@ -822,7 +976,7 @@ class PaperScreenerApp(tk.Tk):
 
         self._batch_profile_label = tk.Label(
             info_inner, text="", bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-            font=("Helvetica", 8, "italic"), anchor="w")
+            font=(FONT_FAMILY, 8, "italic"), anchor="w")
         self._batch_profile_label.pack(anchor="w", pady=(8, 0))
 
         ctrl_inner = self._card(f, label="Batch File")
@@ -834,7 +988,7 @@ class PaperScreenerApp(tk.Tk):
         self._batch_file_label = tk.Label(
             ctrl_row, text="No file selected",
             bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-            font=("Helvetica", 8, "italic"))
+            font=(FONT_FAMILY, 8, "italic"))
         self._batch_file_label.pack(side="left", padx=12)
 
         self._batch_stop_btn = self._btn(
@@ -860,14 +1014,14 @@ class PaperScreenerApp(tk.Tk):
         self._batch_progress.pack(side="left", fill="x", expand=True)
         self._batch_pct_label = tk.Label(
             bar_row, text="", bg=PALETTE["surface"],
-            fg=PALETTE["ink_mid"], font=("Helvetica", 8, "bold"), width=5, anchor="e")
+            fg=PALETTE["ink_mid"], font=(FONT_FAMILY, 8, "bold"), width=5, anchor="e")
         self._batch_pct_label.pack(side="right")
 
         stat_row = tk.Frame(prog_inner, bg=PALETTE["surface"])
         stat_row.pack(fill="x")
         self._batch_status = tk.Label(
             stat_row, text="", bg=PALETTE["surface"],
-            fg=PALETTE["ink_mid"], font=("Helvetica", 8), anchor="w")
+            fg=PALETTE["ink_mid"], font=(FONT_FAMILY, 8), anchor="w")
         self._batch_status.pack(side="left", fill="x", expand=True)
         self._paper_timer_label = tk.Label(
             stat_row, text="", bg=PALETTE["surface"],
@@ -878,7 +1032,7 @@ class PaperScreenerApp(tk.Tk):
         counts_row.pack(fill="x", pady=(4, 0))
         self._batch_counts_label = tk.Label(
             counts_row, text="", bg=PALETTE["surface"],
-            fg=PALETTE["ink_faint"], font=("Helvetica", 8), anchor="w")
+            fg=PALETTE["ink_faint"], font=(FONT_FAMILY, 8), anchor="w")
         self._batch_counts_label.pack(side="left", fill="x", expand=True)
         self._batch_total_timer_label = tk.Label(
             counts_row, text="", bg=PALETTE["surface"],
@@ -890,7 +1044,7 @@ class PaperScreenerApp(tk.Tk):
 
         tk.Label(log_outer, text="LOG",
                  bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 7, "bold"), anchor="w").pack(fill="x", pady=(0, 4))
+                 font=(FONT_FAMILY, 7, "bold"), anchor="w").pack(fill="x", pady=(0, 4))
 
         log_card = tk.Frame(log_outer, bg=PALETTE["console_bg"],
                             highlightbackground=PALETTE["border"],
@@ -926,13 +1080,13 @@ class PaperScreenerApp(tk.Tk):
                        "without it and always tries online retrieval and any file_path "
                        "already in the CSV first."),
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 8), anchor="w", justify="left",
                  wraplength=820).pack(fill="x", pady=(0, 10))
 
         folder_row = tk.Frame(inner, bg=PALETTE["surface"])
         folder_row.pack(fill="x")
         tk.Label(folder_row, text="Folder", bg=PALETTE["surface"],
-                 fg=PALETTE["ink_mid"], font=("Helvetica", 8, "bold"),
+                 fg=PALETTE["ink_mid"], font=(FONT_FAMILY, 8, "bold"),
                  width=7, anchor="w").pack(side="left")
         self._lib_folder_var = tk.StringVar(value=self.library_cfg.folder)
         self._entry(folder_row, self._lib_folder_var).pack(
@@ -948,7 +1102,7 @@ class PaperScreenerApp(tk.Tk):
             command=self._save_library_settings,
             bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
             activebackground=PALETTE["surface"], selectcolor=PALETTE["surface"],
-            font=("Helvetica", 8), anchor="w", relief="flat",
+            font=(FONT_FAMILY, 8), anchor="w", relief="flat",
             cursor="hand2", highlightthickness=0).pack(side="left", padx=(48, 16))
 
         tk.Label(opt_row,
@@ -956,7 +1110,7 @@ class PaperScreenerApp(tk.Tk):
                        "sourced online, or found at its own file_path, is never "
                        "re-sourced from here."),
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8, "italic"), anchor="w").pack(side="left")
+                 font=(FONT_FAMILY, 8, "italic"), anchor="w").pack(side="left")
 
         # ── Drop zone ──
         drop = tk.Frame(inner, bg=PALETTE["surface_dim"],
@@ -971,7 +1125,7 @@ class PaperScreenerApp(tk.Tk):
                   "Drag-and-drop unavailable — install tkinterdnd2, or use Browse… above"),
             bg=PALETTE["surface_dim"],
             fg=PALETTE["ink_mid"] if self._dnd_ready else PALETTE["ink_faint"],
-            font=("Helvetica", 9, "bold" if self._dnd_ready else "italic"))
+            font=(FONT_FAMILY, 9, "bold" if self._dnd_ready else "italic"))
         self._lib_drop_label.pack(expand=True)
         if self._dnd_ready:
             for w in (drop, self._lib_drop_label):
@@ -996,7 +1150,7 @@ class PaperScreenerApp(tk.Tk):
 
         self._lib_status = tk.Label(
             inner, text="No folder scan has been run yet.", bg=PALETTE["surface"],
-            fg=PALETTE["ink_faint"], font=("Helvetica", 8, "italic"),
+            fg=PALETTE["ink_faint"], font=(FONT_FAMILY, 8, "italic"),
             anchor="w", justify="left", wraplength=820)
         self._lib_status.pack(fill="x", pady=(8, 0))
 
@@ -1245,16 +1399,16 @@ class PaperScreenerApp(tk.Tk):
         head.pack_propagate(False)
         tk.Label(head, text="Confirm file → paper assignments",
                  bg=PALETTE["brand"], fg=PALETTE["brand_accent"],
-                 font=("Georgia", 12, "bold")).pack(side="left", padx=20)
+                 font=(FONT_FAMILY, 12, "bold")).pack(side="left", padx=20)
         tk.Label(head, text=rep.summary(), bg=PALETTE["brand"],
-                 fg="#6A6A60", font=("Helvetica", 8)).pack(side="right", padx=20)
+                 fg="#6A6A60", font=(FONT_FAMILY, 8)).pack(side="right", padx=20)
 
         tk.Label(win,
                  text=("Set any row to (skip) to leave that paper to online retrieval. "
                        "A wrong assignment produces a confident verdict for the wrong "
                        "paper, so rows marked CONFIRM had ambiguous evidence and are "
                        "worth opening the file to check."),
-                 bg=PALETTE["bg"], fg=PALETTE["ink_mid"], font=("Helvetica", 8),
+                 bg=PALETTE["bg"], fg=PALETTE["ink_mid"], font=(FONT_FAMILY, 8),
                  anchor="w", justify="left", wraplength=1030).pack(
                      fill="x", padx=20, pady=(10, 6))
 
@@ -1275,7 +1429,7 @@ class PaperScreenerApp(tk.Tk):
         for text, w in (("STATUS", 10), ("FILE", 46), ("EVIDENCE", 30),
                         ("ASSIGN TO PAPER", 20)):
             tk.Label(hdr, text=text, bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                     font=("Helvetica", 7, "bold"), width=w, anchor="w").pack(side="left")
+                     font=(FONT_FAMILY, 7, "bold"), width=w, anchor="w").pack(side="left")
 
         rows_state = []       # (path, kind, method, score, StringVar, was_auto)
 
@@ -1288,12 +1442,12 @@ class PaperScreenerApp(tk.Tk):
             row.pack(fill="x", padx=10, pady=7)
 
             tk.Label(row, text=status, bg=PALETTE["surface"], fg=color,
-                     font=("Helvetica", 8, "bold"), width=10, anchor="w").pack(side="left")
+                     font=(FONT_FAMILY, 8, "bold"), width=10, anchor="w").pack(side="left")
 
             name = Path(path).name
             tk.Label(row, text=(name[:44] + "…") if len(name) > 45 else name,
                      bg=PALETTE["surface"], fg=PALETTE["ink"],
-                     font=("Helvetica", 9), width=46, anchor="w").pack(side="left")
+                     font=(FONT_FAMILY, 9), width=46, anchor="w").pack(side="left")
 
             ev = f"{method} {score:.2f}" if method else "—"
             tk.Label(row, text=ev, bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
@@ -1302,19 +1456,19 @@ class PaperScreenerApp(tk.Tk):
             var = tk.StringVar(value=default_pid or "(skip)")
             combo = ttk.Combobox(row, textvariable=var, state="readonly",
                                  values=["(skip)"] + all_ids,
-                                 font=("Helvetica", 9), width=18)
+                                 font=(FONT_FAMILY, 9), width=18)
             combo.pack(side="left")
 
             if note:
                 tk.Label(card, text=f"    {note}", bg=PALETTE["surface"],
-                         fg=PALETTE["ink_faint"], font=("Helvetica", 8, "italic"),
+                         fg=PALETTE["ink_faint"], font=(FONT_FAMILY, 8, "italic"),
                          anchor="w", justify="left", wraplength=980).pack(
                              fill="x", padx=10, pady=(0, 6))
 
             # Title of the paper currently selected, so the reviewer can sanity
             # check the assignment without leaving the window.
             tlabel = tk.Label(card, text="", bg=PALETTE["surface"],
-                              fg=PALETTE["ink_mid"], font=("Helvetica", 8),
+                              fg=PALETTE["ink_mid"], font=(FONT_FAMILY, 8),
                               anchor="w", justify="left", wraplength=980)
             tlabel.pack(fill="x", padx=10, pady=(0, 6))
 
@@ -1354,13 +1508,13 @@ class PaperScreenerApp(tk.Tk):
                            "retrieval): " + ", ".join(rep.unmatched_papers[:40])
                            + (" …" if len(rep.unmatched_papers) > 40 else "")),
                      bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                     font=("Helvetica", 8, "italic"), anchor="w",
+                     font=(FONT_FAMILY, 8, "italic"), anchor="w",
                      justify="left", wraplength=1030).pack(fill="x")
 
         foot = tk.Frame(win, bg=PALETTE["bg"])
         foot.pack(fill="x", padx=20, pady=12)
         warn = tk.Label(foot, text="", bg=PALETTE["bg"], fg=PALETTE["exclude"],
-                        font=("Helvetica", 8, "bold"), anchor="w")
+                        font=(FONT_FAMILY, 8, "bold"), anchor="w")
         warn.pack(side="left", fill="x", expand=True)
 
         def _apply():
@@ -1455,11 +1609,11 @@ class PaperScreenerApp(tk.Tk):
         self._open_folder_btn.pack(side="left", padx=8)
 
         tk.Label(bar, text="Profile", bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8)).pack(side="left", padx=(12, 4))
+                 font=(FONT_FAMILY, 8)).pack(side="left", padx=(12, 4))
         self._repo_profile_filter = tk.StringVar(value="All")
         self._repo_profile_combo = ttk.Combobox(
             bar, textvariable=self._repo_profile_filter, state="readonly",
-            width=22, style="Profile.TCombobox", font=("Helvetica", 9))
+            width=22, style="Profile.TCombobox", font=(FONT_FAMILY, 9))
         self._repo_profile_combo.pack(side="left")
         self._repo_profile_combo.bind(
             "<<ComboboxSelected>>", lambda _e: self._refresh_repository_tab())
@@ -1468,7 +1622,7 @@ class PaperScreenerApp(tk.Tk):
         ff.pack(side="right")
 
         tk.Label(ff, text="Search", bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8)).pack(side="left", padx=(0, 4))
+                 font=(FONT_FAMILY, 8)).pack(side="left", padx=(0, 4))
         self._filter_var = tk.StringVar()
         self._filter_var.trace_add("write", lambda *_: self._refresh_repository_tab())
         srch = self._entry(ff, self._filter_var, width=18, dim=False)
@@ -1487,7 +1641,7 @@ class PaperScreenerApp(tk.Tk):
                 value=val, command=self._refresh_repository_tab,
                 bg=PALETTE["bg"], fg=fg, activebackground=PALETTE["bg"],
                 activeforeground=fg, selectcolor=PALETTE["bg"],
-                font=("Helvetica", 8, "bold"),
+                font=(FONT_FAMILY, 8, "bold"),
                 indicatoron=0, relief="flat",
                 padx=10, pady=4, cursor="hand2")
             rb.pack(side="left", padx=2)
@@ -1522,7 +1676,7 @@ class PaperScreenerApp(tk.Tk):
                           "Click column headers to sort  ·  "
                           "Basis shows whether screening used full text or abstract only"),
                  bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 7, "italic")).pack(pady=4)
+                 font=(FONT_FAMILY, 7, "italic")).pack(pady=4)
 
     # ── Settings Tab ──────────────────────────────────────────────────────────
 
@@ -1565,18 +1719,18 @@ class PaperScreenerApp(tk.Tk):
                        "text, or edit an existing profile. Compiled criteria are shown for "
                        "review before they can screen a paper."),
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 8), anchor="w", justify="left",
                  wraplength=820).pack(fill="x", pady=(0, 10))
 
         sel_row = tk.Frame(inner, bg=PALETTE["surface"])
         sel_row.pack(fill="x")
         tk.Label(sel_row, text="Active", bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
-                 font=("Helvetica", 8, "bold"), width=7, anchor="w").pack(side="left")
+                 font=(FONT_FAMILY, 8, "bold"), width=7, anchor="w").pack(side="left")
 
         self._profile_var = tk.StringVar()
         self._profile_combo = ttk.Combobox(
             sel_row, textvariable=self._profile_var, state="readonly",
-            style="Profile.TCombobox", font=("Helvetica", 10))
+            style="Profile.TCombobox", font=(FONT_FAMILY, 10))
         self._profile_combo.pack(side="left", fill="x", expand=True, padx=(6, 10), ipady=3)
         self._profile_combo.bind("<<ComboboxSelected>>", self._on_profile_selected)
 
@@ -1613,7 +1767,7 @@ class PaperScreenerApp(tk.Tk):
             inner, text="  Find PDFs automatically from links and DOIs",
             variable=self._res_enabled, command=self._save_resolver_settings,
             bg=PALETTE["surface"], fg=PALETTE["ink"], activebackground=PALETTE["surface"],
-            selectcolor=PALETTE["surface"], font=("Helvetica", 10, "bold"),
+            selectcolor=PALETTE["surface"], font=(FONT_FAMILY, 10, "bold"),
             anchor="w", relief="flat", cursor="hand2", highlightthickness=0)
         cb.pack(fill="x")
 
@@ -1623,14 +1777,14 @@ class PaperScreenerApp(tk.Tk):
                        "Open-access copies only. Paywalled articles still need a manual "
                        "upload — expect roughly 50–70% coverage."),
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 8), anchor="w", justify="left",
                  wraplength=820).pack(fill="x", pady=(4, 10))
 
         # Contact email
         em_row = tk.Frame(inner, bg=PALETTE["surface"])
         em_row.pack(fill="x", pady=(0, 6))
         tk.Label(em_row, text="Contact email", bg=PALETTE["surface"],
-                 fg=PALETTE["ink_mid"], font=("Helvetica", 8, "bold"),
+                 fg=PALETTE["ink_mid"], font=(FONT_FAMILY, 8, "bold"),
                  width=16, anchor="w").pack(side="left")
         self._res_email = tk.StringVar(value=rc.contact_email)
         e = self._entry(em_row, self._res_email, width=38)
@@ -1638,13 +1792,13 @@ class PaperScreenerApp(tk.Tk):
         e.bind("<FocusOut>", lambda _e: self._save_resolver_settings())
         tk.Label(em_row, text="  Required by Unpaywall; gets faster OpenAlex responses.",
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8, "italic")).pack(side="left")
+                 font=(FONT_FAMILY, 8, "italic")).pack(side="left")
 
         # OpenAlex key
         oa_row = tk.Frame(inner, bg=PALETTE["surface"])
         oa_row.pack(fill="x", pady=(0, 6))
         tk.Label(oa_row, text="OpenAlex key", bg=PALETTE["surface"],
-                 fg=PALETTE["ink_mid"], font=("Helvetica", 8, "bold"),
+                 fg=PALETTE["ink_mid"], font=(FONT_FAMILY, 8, "bold"),
                  width=16, anchor="w").pack(side="left")
         self._res_oa_key = tk.StringVar(value=rc.openalex_api_key)
         e2 = self._entry(oa_row, self._res_oa_key, width=38)
@@ -1652,13 +1806,13 @@ class PaperScreenerApp(tk.Tk):
         e2.bind("<FocusOut>", lambda _e: self._save_resolver_settings())
         tk.Label(oa_row, text="  Optional. Metadata is free; cached PDFs are billed.",
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8, "italic")).pack(side="left")
+                 font=(FONT_FAMILY, 8, "italic")).pack(side="left")
 
         tk.Frame(inner, bg=PALETTE["border"], height=1).pack(fill="x", pady=10)
 
         # Source toggles
         tk.Label(inner, text="SOURCES", bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 7, "bold"), anchor="w").pack(fill="x", pady=(0, 4))
+                 font=(FONT_FAMILY, 7, "bold"), anchor="w").pack(fill="x", pady=(0, 4))
 
         toggles = tk.Frame(inner, bg=PALETTE["surface"])
         toggles.pack(fill="x")
@@ -1679,7 +1833,7 @@ class PaperScreenerApp(tk.Tk):
                 command=self._save_resolver_settings,
                 bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
                 activebackground=PALETTE["surface"], selectcolor=PALETTE["surface"],
-                font=("Helvetica", 9), anchor="w", relief="flat",
+                font=(FONT_FAMILY, 9), anchor="w", relief="flat",
                 cursor="hand2", highlightthickness=0
             ).grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 24), pady=1)
 
@@ -1692,7 +1846,7 @@ class PaperScreenerApp(tk.Tk):
             variable=self._res_oa_content, command=self._save_resolver_settings,
             bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
             activebackground=PALETTE["surface"], selectcolor=PALETTE["surface"],
-            font=("Helvetica", 9), anchor="w", relief="flat",
+            font=(FONT_FAMILY, 9), anchor="w", relief="flat",
             cursor="hand2", highlightthickness=0).pack(fill="x", pady=(8, 0))
 
         tk.Frame(inner, bg=PALETTE["border"], height=1).pack(fill="x", pady=10)
@@ -1706,7 +1860,7 @@ class PaperScreenerApp(tk.Tk):
             variable=self._abstract_fallback, command=self._save_resolver_settings,
             bg=PALETTE["surface"], fg=PALETTE["ink"],
             activebackground=PALETTE["surface"], selectcolor=PALETTE["surface"],
-            font=("Helvetica", 10, "bold"), anchor="w", relief="flat",
+            font=(FONT_FAMILY, 10, "bold"), anchor="w", relief="flat",
             cursor="hand2", highlightthickness=0).pack(fill="x")
 
         tk.Label(inner,
@@ -1716,14 +1870,14 @@ class PaperScreenerApp(tk.Tk):
                        "rather than being decided on thin evidence. Records are stamped "
                        "screening_basis = abstract_only."),
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 8), anchor="w", justify="left",
                  wraplength=820).pack(fill="x", pady=(4, 10))
 
         # Test row
         test_row = tk.Frame(inner, bg=PALETTE["surface"])
         test_row.pack(fill="x")
         tk.Label(test_row, text="Test", bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
-                 font=("Helvetica", 8, "bold"), width=16, anchor="w").pack(side="left")
+                 font=(FONT_FAMILY, 8, "bold"), width=16, anchor="w").pack(side="left")
         self._res_test_var = tk.StringVar(value="10.7717/peerj.4375")
         self._entry(test_row, self._res_test_var, width=38).pack(side="left", ipady=4)
         self._btn(test_row, "Resolve", self._test_resolver,
@@ -1734,44 +1888,152 @@ class PaperScreenerApp(tk.Tk):
             font=("Courier New", 8), anchor="w", justify="left", wraplength=820)
         self._res_test_out.pack(fill="x", pady=(8, 0))
 
-    # ── Settings: API key ─────────────────────────────────────────────────────
+    # ── Settings: model provider ────────────────────────────────────────────
 
     def _build_apikey_card(self, f):
-        key_inner = self._card(f, label="Anthropic API Key", pad=(20, 16))
+        inner = self._card(f, label="Model Provider", pad=(20, 16))
 
-        key_row = tk.Frame(key_inner, bg=PALETTE["surface"])
-        key_row.pack(fill="x")
+        tk.Label(inner,
+                 text=("triageQ's prompts are plain text and work with any provider. "
+                       "PDF vision — reading the paper's own layout, figures, and tables "
+                       "— is only available on providers built to support it; other "
+                       "providers screen from text extracted locally instead."),
+                 bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
+                 font=(FONT_FAMILY, 8), anchor="w", justify="left",
+                 wraplength=820).pack(fill="x", pady=(0, 10))
 
-        self._key_entry = tk.Entry(
-            key_row, textvariable=self._api_key,
-            font=("Courier New", 10), show="*", width=50,
-            bd=0, relief="flat",
-            bg=PALETTE["surface_dim"], fg=PALETTE["ink"],
-            insertbackground=PALETTE["ink"],
-            highlightthickness=1,
-            highlightbackground=PALETTE["border"],
-            highlightcolor=PALETTE["ink"])
-        self._key_entry.pack(side="left", ipady=6, padx=(0, 10))
-        self._btn(key_row, "Show / Hide", self._toggle_key_vis,
+        sel_row = tk.Frame(inner, bg=PALETTE["surface"])
+        sel_row.pack(fill="x")
+        tk.Label(sel_row, text="Provider", bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
+                 font=(FONT_FAMILY, 8, "bold"), width=10, anchor="w").pack(side="left")
+        # The combobox shows labels but self._provider_var must hold the raw
+        # provider key (used everywhere else) — so the combobox gets its own
+        # display variable, translated through this lookup on change.
+        self._provider_label_to_key = {v: k for k, v in mp.PROVIDER_LABELS.items()}
+        provider_label_var = tk.StringVar(
+            value=mp.PROVIDER_LABELS[self._current_provider_name()])
+        provider_combo = ttk.Combobox(
+            sel_row, textvariable=provider_label_var, state="readonly",
+            values=list(mp.PROVIDER_LABELS.values()), style="Profile.TCombobox",
+            font=(FONT_FAMILY, 10), width=32)
+
+        def _on_combo_change(_evt=None):
+            key = self._provider_label_to_key.get(provider_label_var.get(), "anthropic")
+            self._provider_var.set(key)
+            self._on_provider_changed()
+
+        provider_combo.bind("<<ComboboxSelected>>", _on_combo_change)
+        provider_combo.pack(side="left", ipady=3)
+        self._provider_combo = provider_combo
+
+        pdf_note = tk.Label(inner, text="", bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
+                            font=(FONT_FAMILY, 8, "italic"), anchor="w")
+        pdf_note.pack(fill="x", pady=(6, 10))
+        self._provider_pdf_note = pdf_note
+
+        tk.Frame(inner, bg=PALETTE["border"], height=1).pack(fill="x", pady=(0, 10))
+
+        # One field-set per provider; _refresh_provider_card_visibility() shows
+        # only the active one.
+        self._provider_field_frames = {}
+
+        # Anthropic
+        af = tk.Frame(inner, bg=PALETTE["surface"])
+        self._provider_field_frames["anthropic"] = af
+        self._key_entry = self._build_key_row(af, "API Key", self._provider_keys["anthropic"])
+        self._build_model_row(af, self._provider_models["anthropic"])
+        self._build_info_lines(af, [
+            "Key is stored in memory only — never written to disk.",
+            "Get a key:    console.anthropic.com  →  API Keys  →  Create Key",
+            "Add credits:  console.anthropic.com  →  Billing  (minimum $5)",
+        ])
+
+        # OpenAI
+        of = tk.Frame(inner, bg=PALETTE["surface"])
+        self._provider_field_frames["openai"] = of
+        self._build_key_row(of, "API Key", self._provider_keys["openai"])
+        self._build_model_row(of, self._provider_models["openai"],
+                              hint="e.g. a current vision-capable GPT model — check "
+                                   "platform.openai.com/docs/models for what's current")
+        self._build_info_lines(of, [
+            "Key is stored in memory only — never written to disk.",
+            "Get a key:    platform.openai.com  →  API keys",
+        ])
+
+        # OpenAI-compatible
+        cf = tk.Frame(inner, bg=PALETTE["surface"])
+        self._provider_field_frames["openai_compatible"] = cf
+        base_row = tk.Frame(cf, bg=PALETTE["surface"])
+        base_row.pack(fill="x", pady=(0, 6))
+        tk.Label(base_row, text="Base URL", bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
+                 font=(FONT_FAMILY, 8, "bold"), width=10, anchor="w").pack(side="left")
+        self._entry(base_row, self._compat_base_url, width=46).pack(
+            side="left", ipady=5, padx=(0, 10))
+        self._build_key_row(cf, "API Key (often unused)", self._provider_keys["openai_compatible"])
+        self._build_model_row(cf, self._provider_models["openai_compatible"],
+                              hint="the model name your endpoint expects")
+        self._build_info_lines(cf, [
+            "Any server that implements the OpenAI /chat/completions API: a local "
+            "model server (e.g. http://localhost:11434/v1, http://localhost:8000/v1), "
+            "or a hosted aggregator.",
+            "Text-only — see the note above. Screening still works, just without "
+            "native PDF vision.",
+        ])
+        for var in (self._compat_base_url,):
+            var.trace_add("write", lambda *_: self._save_provider_settings())
+
+        self._refresh_provider_card_visibility()
+
+    def _build_key_row(self, parent, label, var):
+        row = tk.Frame(parent, bg=PALETTE["surface"])
+        row.pack(fill="x", pady=(0, 6))
+        tk.Label(row, text=label, bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
+                 font=(FONT_FAMILY, 8, "bold"), width=17, anchor="w").pack(side="left")
+        entry = tk.Entry(
+            row, textvariable=var, font=("Courier New", 10), show="*", width=42,
+            bd=0, relief="flat", bg=PALETTE["surface_dim"], fg=PALETTE["ink"],
+            insertbackground=PALETTE["ink"], highlightthickness=1,
+            highlightbackground=PALETTE["border"], highlightcolor=PALETTE["ink"])
+        entry.pack(side="left", ipady=6, padx=(0, 10))
+        self._btn(row, "Show / Hide", lambda: entry.config(
+            show="" if entry.cget("show") == "*" else "*"),
                   "ghost", padx=12, pady=5).pack(side="left")
+        return entry
 
-        tk.Frame(key_inner, bg=PALETTE["border"], height=1).pack(fill="x", pady=12)
+    def _build_model_row(self, parent, var, hint=""):
+        row = tk.Frame(parent, bg=PALETTE["surface"])
+        row.pack(fill="x", pady=(0, 6))
+        tk.Label(row, text="Model", bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
+                 font=(FONT_FAMILY, 8, "bold"), width=17, anchor="w").pack(side="left")
+        self._entry(row, var, width=42).pack(side="left", ipady=5)
+        var.trace_add("write", lambda *_: self._save_provider_settings())
+        if hint:
+            tk.Label(parent, text=hint, bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
+                     font=(FONT_FAMILY, 7, "italic"), anchor="w").pack(fill="x", pady=(0, 6))
 
-        info_lines = [
-            ("Key is stored in memory only — never written to disk.", PALETTE["ink_faint"]),
-            ("Get a key:    console.anthropic.com  →  API Keys  →  Create Key",
-             PALETTE["ink_mid"]),
-            ("Add credits:  console.anthropic.com  →  Billing  (minimum $5)",
-             PALETTE["ink_mid"]),
-            ("", PALETTE["ink_faint"]),
-            (f"Model:   {CLAUDE_MODEL}", PALETTE["ink_mid"]),
-            ("Cost:    ~$0.01–0.03 per paper  ·  200 papers ≈ $4–6 total",
-             PALETTE["ink_mid"]),
-        ]
-        for text, color in info_lines:
-            tk.Label(key_inner, text=text, bg=PALETTE["surface"],
-                     fg=color, font=("Helvetica", 8), anchor="w",
-                     justify="left").pack(fill="x")
+    def _build_info_lines(self, parent, lines):
+        for text in lines:
+            tk.Label(parent, text=text, bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
+                     font=(FONT_FAMILY, 8), anchor="w", justify="left",
+                     wraplength=780).pack(fill="x")
+        tk.Label(parent, text="Cost varies by provider and model — check their pricing page.",
+                 bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
+                 font=(FONT_FAMILY, 8), anchor="w").pack(fill="x", pady=(4, 0))
+
+    def _refresh_provider_card_visibility(self):
+        name = self._current_provider_name()
+        for key, frame in self._provider_field_frames.items():
+            if key == name:
+                frame.pack(fill="x")
+            else:
+                frame.pack_forget()
+        vision = mp.supports_pdf_vision(name)
+        self._provider_pdf_note.config(
+            text=("✓ This provider reads PDFs natively (native PDF vision)."
+                  if vision else
+                  "⚠ This provider is text-only — PDFs are converted to text locally "
+                  "before screening (pdf_vision_used = no in the repository)."),
+            fg=PALETTE["include"] if vision else PALETTE["manual"])
 
     # ── Settings: repository ──────────────────────────────────────────────────
 
@@ -1782,14 +2044,26 @@ class PaperScreenerApp(tk.Tk):
         row.pack(fill="x")
         tk.Label(row, text=f"triageQ  {APP_VERSION}",
                  bg=PALETTE["surface"], fg=PALETTE["ink"],
-                 font=("Helvetica", 11, "bold"), anchor="w").pack(side="left")
+                 font=(FONT_FAMILY, 11, "bold"), anchor="w").pack(side="left")
 
         tk.Label(inner,
                  text=("An open, human-in-the-loop tool for sorting large volumes of "
                        "content against custom criteria."),
                  bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
-                 font=("Helvetica", 9), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 9), anchor="w", justify="left",
                  wraplength=820).pack(fill="x", pady=(4, 10))
+
+        credit = tk.Frame(inner, bg=PALETTE["surface"])
+        credit.pack(fill="x", pady=(0, 10))
+        try:
+            self._about_ldi_badge_img = tk.PhotoImage(file=str(branding.LDI_BADGE_44))
+            tk.Label(credit, image=self._about_ldi_badge_img,
+                     bg=PALETTE["surface"]).pack(side="left", padx=(0, 10))
+        except Exception:
+            pass
+        tk.Label(credit, text="AI-assisted application built by Learning Data Insights",
+                 bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
+                 font=(FONT_FAMILY, 9, "bold"), anchor="w").pack(side="left")
 
         tk.Frame(inner, bg=PALETTE["border"], height=1).pack(fill="x", pady=(0, 10))
 
@@ -1801,7 +2075,7 @@ class PaperScreenerApp(tk.Tk):
                      "licensed under CC BY-SA 4.0."
                  ),
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8, "italic"), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 8, "italic"), anchor="w", justify="left",
                  wraplength=820).pack(fill="x")
 
     def _build_repo_card(self, f):
@@ -1829,7 +2103,7 @@ class PaperScreenerApp(tk.Tk):
             row = tk.Frame(repo_inner, bg=PALETTE["surface"])
             row.pack(fill="x", pady=1)
             tk.Label(row, text=label, bg=PALETTE["surface"],
-                     fg=PALETTE["ink_faint"], font=("Helvetica", 8),
+                     fg=PALETTE["ink_faint"], font=(FONT_FAMILY, 8),
                      width=18, anchor="w").pack(side="left")
             tk.Label(row, text=fname, bg=PALETTE["surface"],
                      fg=PALETTE["ink_mid"], font=("Courier New", 8),
@@ -1839,7 +2113,7 @@ class PaperScreenerApp(tk.Tk):
                  text=("Criteria columns differ between profiles, so each profile also gets "
                        "its own CSV with that profile's full criteria columns."),
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8, "italic"), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 8, "italic"), anchor="w", justify="left",
                  wraplength=820).pack(fill="x", pady=(8, 0))
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1916,8 +2190,8 @@ class PaperScreenerApp(tk.Tk):
         self._show_text_window(
             f"Prompt Preview — {self.active_profile.get('profile_name')}",
             prompt,
-            subtitle=("This is the exact system prompt sent to Claude for every paper "
-                      "screened with this profile."))
+            subtitle=("This is the exact system prompt sent to the model for every "
+                      "paper screened with this profile."))
 
     def _show_text_window(self, title, body, subtitle=""):
         win = tk.Toplevel(self)
@@ -1929,12 +2203,12 @@ class PaperScreenerApp(tk.Tk):
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
         tk.Label(hdr, text=title, bg=PALETTE["brand"], fg=PALETTE["brand_accent"],
-                 font=("Helvetica", 10, "bold"), anchor="w",
+                 font=(FONT_FAMILY, 10, "bold"), anchor="w",
                  padx=20).pack(fill="both", expand=True)
 
         if subtitle:
             tk.Label(win, text=subtitle, bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                     font=("Helvetica", 8, "italic"), anchor="w", justify="left",
+                     font=(FONT_FAMILY, 8, "italic"), anchor="w", justify="left",
                      wraplength=840).pack(fill="x", padx=20, pady=(10, 0))
 
         frame = tk.Frame(win, bg=PALETTE["console_bg"])
@@ -1969,33 +2243,34 @@ class PaperScreenerApp(tk.Tk):
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
         tk.Label(hdr, text="New Criteria Profile", bg=PALETTE["brand"],
-                 fg=PALETTE["brand_accent"], font=("Helvetica", 10, "bold"),
+                 fg=PALETTE["brand_accent"], font=(FONT_FAMILY, 10, "bold"),
                  anchor="w", padx=20).pack(fill="both", expand=True)
 
         tk.Label(win,
                  text=("Paste your inclusion and exclusion criteria below — a protocol "
-                       "excerpt, a PICO statement, or plain prose. Claude will convert it "
+                       "excerpt, a PICO statement, or plain prose. Your configured model "
+                       "will convert it "
                        "into a structured profile with explicit boundary rules, which you "
                        "then review and edit before saving.\n\n"
                        "Free-text criteria rarely state what to EXCLUDE. The compiler "
                        "infers exclusion rules and flags every one it added, so you can "
                        "check them rather than discover the gaps mid-review."),
                  bg=PALETTE["bg"], fg=PALETTE["ink_mid"],
-                 font=("Helvetica", 9), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 9), anchor="w", justify="left",
                  wraplength=820).pack(fill="x", padx=20, pady=(12, 8))
 
         frame = tk.Frame(win, bg=PALETTE["surface"],
                          highlightbackground=PALETTE["border"], highlightthickness=1)
         frame.pack(fill="both", expand=True, padx=20)
         txt = scrolledtext.ScrolledText(
-            frame, font=("Helvetica", 10),
+            frame, font=(FONT_FAMILY, 10),
             bg=PALETTE["surface"], fg=PALETTE["ink"],
             insertbackground=PALETTE["ink"],
             bd=0, padx=14, pady=12, wrap="word")
         txt.pack(fill="both", expand=True)
 
         status = tk.Label(win, text="", bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                          font=("Helvetica", 8, "italic"), anchor="w")
+                          font=(FONT_FAMILY, 8, "italic"), anchor="w")
         status.pack(fill="x", padx=20, pady=(6, 0))
 
         row = tk.Frame(win, bg=PALETTE["bg"])
@@ -2029,24 +2304,23 @@ class PaperScreenerApp(tk.Tk):
                     "Not Enough Text",
                     "Please paste at least a few sentences of criteria.", parent=win)
                 return
-            key = self._api_key.get().strip()
-            if not key:
-                messagebox.showwarning(
-                    "API Key Required",
-                    "Enter your Anthropic API key in Settings first.", parent=win)
+            ok, msg = self._current_provider_ready()
+            if not ok:
+                messagebox.showwarning("Model Provider Not Configured", msg, parent=win)
                 return
+            provider_cfg = self._current_provider_config()
 
             compile_btn.config(state="disabled", text="Compiling…")
-            status.config(text="Compiling criteria with Claude — this takes 20–60 seconds…")
+            status.config(text="Compiling criteria — this takes 20–60 seconds…")
 
             def _worker():
                 try:
-                    profile, notes = cp.compile_criteria_with_claude(
-                        raw, key, CLAUDE_MODEL,
+                    profile, notes = cp.compile_criteria(
+                        raw, provider_cfg,
                         progress=lambda m: self.after(0, status.config, {"text": m}))
                 except Exception as exc:
                     self.after(0, compile_btn.config,
-                               {"state": "normal", "text": "Compile with Claude"})
+                               {"state": "normal", "text": "Compile Criteria"})
                     self.after(0, status.config, {"text": "Compilation failed."})
                     self.after(0, messagebox.showerror, "Compile Failed", str(exc))
                     return
@@ -2057,7 +2331,7 @@ class PaperScreenerApp(tk.Tk):
 
         self._btn(row, "Load from File…", _load_file, "secondary",
                   padx=14, pady=6).pack(side="left")
-        compile_btn = self._btn(row, "Compile with Claude", _compile, "primary",
+        compile_btn = self._btn(row, "Compile Criteria", _compile, "primary",
                                 padx=18, pady=6)
         compile_btn.pack(side="right")
         self._btn(row, "Cancel", win.destroy, "ghost",
@@ -2087,25 +2361,26 @@ class PaperScreenerApp(tk.Tk):
             return
 
         # Raw text — hand it to the compiler
-        key = self._api_key.get().strip()
-        if not key:
+        ok, msg = self._current_provider_ready()
+        if not ok:
             messagebox.showwarning(
-                "API Key Required",
-                "This file is free text, so it needs to be compiled into a structured "
-                "profile. Enter your Anthropic API key in Settings first.")
+                "Model Provider Not Configured",
+                f"This file is free text, so it needs to be compiled into a structured "
+                f"profile. {msg}")
             return
+        provider_cfg = self._current_provider_config()
         if not messagebox.askyesno(
                 "Compile Criteria",
                 f"{Path(path).name} contains free text rather than a structured profile.\n\n"
-                "Compile it into a criteria profile with Claude? You will review the "
-                "result before it is saved."):
+                "Compile it into a criteria profile? You will review the result before "
+                "it is saved."):
             return
 
         self._set_progress("Compiling criteria…")
 
         def _worker():
             try:
-                profile, notes = cp.compile_criteria_with_claude(raw, key, CLAUDE_MODEL)
+                profile, notes = cp.compile_criteria(raw, provider_cfg)
             except Exception as exc:
                 self.after(0, messagebox.showerror, "Compile Failed", str(exc))
                 return
@@ -2181,21 +2456,22 @@ class PaperScreenerApp(tk.Tk):
                  text=("Review before use — check every exclusion rule"
                        if is_new else f"Editing: {profile.get('profile_name','')}"),
                  bg=PALETTE["brand"], fg=PALETTE["brand_accent"],
-                 font=("Helvetica", 10, "bold"), anchor="w",
+                 font=(FONT_FAMILY, 10, "bold"), anchor="w",
                  padx=20).pack(fill="both", expand=True)
 
-        # Compiler notes
+        # Compiler notes — Lavender, not the verdict amber: this is a
+        # "read these, they're inferred rules" prompt, not a paper verdict.
         if notes:
-            nf = tk.Frame(win, bg=PALETTE["manual_bg"],
-                          highlightbackground=PALETTE["manual"], highlightthickness=1)
+            nf = tk.Frame(win, bg=PALETTE["nuance_bg"],
+                          highlightbackground=PALETTE["nuance"], highlightthickness=1)
             nf.pack(fill="x", padx=20, pady=(12, 0))
             tk.Label(nf, text="COMPILER NOTES — REVIEW THESE",
-                     bg=PALETTE["manual_bg"], fg=PALETTE["manual"],
-                     font=("Helvetica", 7, "bold"), anchor="w",
+                     bg=PALETTE["nuance_bg"], fg=PALETTE["nuance"],
+                     font=(FONT_FAMILY, 7, "bold"), anchor="w",
                      padx=12).pack(fill="x", pady=(8, 2))
             body = "\n".join(f"•  {n}" for n in notes)
-            tk.Label(nf, text=body, bg=PALETTE["manual_bg"], fg=PALETTE["ink"],
-                     font=("Helvetica", 9), anchor="w", justify="left",
+            tk.Label(nf, text=body, bg=PALETTE["nuance_bg"], fg=PALETTE["ink"],
+                     font=(FONT_FAMILY, 9), anchor="w", justify="left",
                      wraplength=900, padx=12).pack(fill="x", pady=(0, 10))
 
         tk.Label(win,
@@ -2203,7 +2479,7 @@ class PaperScreenerApp(tk.Tk):
                        "and exclude_if conditions — a criterion with no exclusion rules is "
                        "the fastest way to get false INCLUDEs."),
                  bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8, "italic"), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 8, "italic"), anchor="w", justify="left",
                  wraplength=920).pack(fill="x", padx=20, pady=(10, 6))
 
         frame = tk.Frame(win, bg=PALETTE["console_bg"],
@@ -2219,7 +2495,7 @@ class PaperScreenerApp(tk.Tk):
         txt.insert("1.0", json.dumps(clean, indent=2, ensure_ascii=False))
 
         status = tk.Label(win, text="", bg=PALETTE["bg"], fg=PALETTE["ink_faint"],
-                          font=("Helvetica", 8), anchor="w", justify="left",
+                          font=(FONT_FAMILY, 8), anchor="w", justify="left",
                           wraplength=920)
         status.pack(fill="x", padx=20, pady=(6, 0))
 
@@ -2321,8 +2597,41 @@ class PaperScreenerApp(tk.Tk):
     # Settings helpers
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _toggle_key_vis(self):
-        self._key_entry.config(show="" if self._key_entry.cget("show") == "*" else "*")
+    def _current_provider_name(self) -> str:
+        return self._provider_var.get() or "anthropic"
+
+    def _current_provider_config(self) -> "mp.ProviderConfig":
+        name = self._current_provider_name()
+        return mp.ProviderConfig(
+            provider=name,
+            api_key=self._provider_keys[name].get().strip(),
+            model=self._provider_models[name].get().strip(),
+            base_url=self._compat_base_url.get().strip(),
+        )
+
+    def _current_provider_ready(self) -> tuple[bool, str]:
+        """(ok, message) — what's missing, if anything, for the active provider."""
+        cfg = self._current_provider_config()
+        if not cfg.model:
+            return False, f"Enter a model name for {mp.PROVIDER_LABELS[cfg.provider]} in Settings."
+        if cfg.provider == "openai_compatible":
+            if not cfg.base_url:
+                return False, "Enter a base URL for the OpenAI-compatible endpoint in Settings."
+        elif not cfg.api_key:
+            return False, f"Enter your {mp.PROVIDER_LABELS[cfg.provider]} API key in Settings."
+        return True, ""
+
+    def _save_provider_settings(self):
+        self.settings["provider"] = self._current_provider_name()
+        self.settings["provider_models"] = {
+            name: var.get().strip() for name, var in self._provider_models.items()
+        }
+        self.settings["openai_compatible_base_url"] = self._compat_base_url.get().strip()
+        save_settings(self.settings)
+
+    def _on_provider_changed(self):
+        self._save_provider_settings()
+        self._refresh_provider_card_visibility()
 
     def _save_resolver_settings(self):
         rc = self.resolver_cfg
@@ -2376,16 +2685,16 @@ class PaperScreenerApp(tk.Tk):
              "pip install tkinterdnd2"),
         ]
         tk.Label(inner, text="This install can:", bg=PALETTE["surface"],
-                 fg=PALETTE["ink_mid"], font=("Helvetica", 8, "bold"),
+                 fg=PALETTE["ink_mid"], font=(FONT_FAMILY, 8, "bold"),
                  anchor="w").pack(fill="x")
         for label, ok, hint in rows:
             row = tk.Frame(inner, bg=PALETTE["surface"])
             row.pack(fill="x", pady=1)
             tk.Label(row, text="✓" if ok else "✗", bg=PALETTE["surface"],
                      fg=PALETTE["include"] if ok else PALETTE["exclude"],
-                     font=("Helvetica", 9, "bold"), width=3).pack(side="left")
+                     font=(FONT_FAMILY, 9, "bold"), width=3).pack(side="left")
             tk.Label(row, text=label, bg=PALETTE["surface"], fg=PALETTE["ink"],
-                     font=("Helvetica", 9), width=34, anchor="w").pack(side="left")
+                     font=(FONT_FAMILY, 9), width=34, anchor="w").pack(side="left")
             if not ok:
                 tk.Label(row, text=hint, bg=PALETTE["surface"],
                          fg=PALETTE["ink_faint"], font=("Courier New", 8),
@@ -2402,7 +2711,7 @@ class PaperScreenerApp(tk.Tk):
                        "sends more assignments to manual review; lowering the floor "
                        "offers weaker guesses instead of leaving files unmatched."),
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 8), anchor="w", justify="left",
                  wraplength=820).pack(fill="x", pady=(0, 8))
 
         thr = tk.Frame(inner, bg=PALETTE["surface"])
@@ -2414,7 +2723,7 @@ class PaperScreenerApp(tk.Tk):
             cell = tk.Frame(thr, bg=PALETTE["surface"])
             cell.pack(side="left", padx=(0, 24))
             tk.Label(cell, text=label, bg=PALETTE["surface"], fg=PALETTE["ink_mid"],
-                     font=("Helvetica", 8, "bold"), anchor="w").pack(side="left")
+                     font=(FONT_FAMILY, 8, "bold"), anchor="w").pack(side="left")
             e = self._entry(cell, var, width=6)
             e.pack(side="left", ipady=3, padx=(6, 0))
             e.bind("<FocusOut>", lambda _e: self._save_library_settings())
@@ -2428,7 +2737,7 @@ class PaperScreenerApp(tk.Tk):
             variable=self._lib_convert_var, command=self._save_library_settings,
             bg=PALETTE["surface"], fg=PALETTE["ink"],
             activebackground=PALETTE["surface"], selectcolor=PALETTE["surface"],
-            font=("Helvetica", 9), anchor="w", relief="flat",
+            font=(FONT_FAMILY, 9), anchor="w", relief="flat",
             cursor="hand2", highlightthickness=0).pack(fill="x", pady=(10, 0))
 
         self._lib_conservative_var = tk.BooleanVar(
@@ -2440,7 +2749,7 @@ class PaperScreenerApp(tk.Tk):
             variable=self._lib_conservative_var, command=self._save_library_settings,
             bg=PALETTE["surface"], fg=PALETTE["ink"],
             activebackground=PALETTE["surface"], selectcolor=PALETTE["surface"],
-            font=("Helvetica", 9), anchor="w", relief="flat",
+            font=(FONT_FAMILY, 9), anchor="w", relief="flat",
             cursor="hand2", highlightthickness=0).pack(fill="x", pady=(2, 0))
         tk.Label(inner,
                  text=("Off by default: decks are screened as full text. Turn on if "
@@ -2448,7 +2757,7 @@ class PaperScreenerApp(tk.Tk):
                        "method detail a paper would state. Deck-sourced rows are "
                        "always tagged source_file_type=slides either way."),
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
-                 font=("Helvetica", 8, "italic"), anchor="w", justify="left",
+                 font=(FONT_FAMILY, 8, "italic"), anchor="w", justify="left",
                  wraplength=800).pack(fill="x", padx=(24, 0), pady=(2, 0))
 
     def _test_resolver(self):
@@ -2645,7 +2954,7 @@ class PaperScreenerApp(tk.Tk):
         try:
             result = analyze_paper(
                 payload, self.active_profile,
-                api_key=self._api_key.get().strip(),
+                provider_cfg=self._current_provider_config(),
                 screening_basis=basis,
                 progress_callback=lambda m: self.after(0, self._set_progress, m),
             )
@@ -2662,7 +2971,7 @@ class PaperScreenerApp(tk.Tk):
         except Exception as e:
             self.after(0, self._stop_single_timer, None)
             self.after(0, self._set_progress, "Analysis failed.")
-            self.after(0, messagebox.showerror, "Error", str(e))
+            self.after(0, messagebox.showerror, "Error", _friendly_save_error(e))
         finally:
             self.after(0, self._set_busy, False)
 
@@ -2703,7 +3012,8 @@ class PaperScreenerApp(tk.Tk):
             "file_match_score":     match_score,
             "source_file_type":     source_kind,
             "analyzed_at":          datetime.datetime.now().isoformat(timespec="seconds"),
-            "model_used":           CLAUDE_MODEL,
+            "model_used":           result.get("_provider_model", ""),
+            "pdf_vision_used":      result.get("_pdf_vision_used", ""),
             "_full_result":         result,
         }
 
@@ -2848,7 +3158,7 @@ class PaperScreenerApp(tk.Tk):
                         "info")
 
     def _batch_worker(self):
-        key = self._api_key.get().strip()
+        provider_cfg = self._current_provider_config()
         profile = self.active_profile
         allow_abstract = bool(self._abstract_fallback.get())
         rows = []
@@ -3023,7 +3333,7 @@ class PaperScreenerApp(tk.Tk):
             try:
                 self._log_batch("Analyzing… ", "info")
                 result = analyze_paper(
-                    payload, profile, api_key=key, screening_basis=basis,
+                    payload, profile, provider_cfg=provider_cfg, screening_basis=basis,
                     progress_callback=None,
                 )
                 if mismatch_note:
@@ -3035,19 +3345,31 @@ class PaperScreenerApp(tk.Tk):
                 rtag = {"INCLUDE": "ok", "EXCLUDE": "err",
                         "MANUAL_REVIEW": "info"}.get(rec, "info")
 
+                entry = self._build_repo_entry(
+                    pid, result, basis=basis, url=url, file_path=fp,
+                    pdf_source=pdf_source, pdf_url=pdf_url,
+                    match_method=match_method, match_score=match_score,
+                    source_kind=source_kind)
+                try:
+                    save_to_repository(entry)
+                except Exception as save_exc:
+                    # The verdict was reached but never persisted — count it as an
+                    # error, not also as a completed INCLUDE/EXCLUDE/MANUAL_REVIEW,
+                    # or the batch tally double-counts this row.
+                    self._log_batch(
+                        f"ERROR saving {pid}: {_friendly_save_error(save_exc)}\n", "err")
+                    n_error += 1
+                    self.after(0, self._update_batch_counts, i + 1, total,
+                               n_included, n_excluded, n_manual, n_error)
+                    continue
+
+                # Only reached once the save above actually succeeded.
                 if rec == "INCLUDE":
                     n_included += 1
                 elif rec == "EXCLUDE":
                     n_excluded += 1
                 elif rec == "MANUAL_REVIEW":
                     n_manual += 1
-
-                entry = self._build_repo_entry(
-                    pid, result, basis=basis, url=url, file_path=fp,
-                    pdf_source=pdf_source, pdf_url=pdf_url,
-                    match_method=match_method, match_score=match_score,
-                    source_kind=source_kind)
-                save_to_repository(entry)
 
                 suffix = "  [abstract only]" if basis == "abstract_only" else ""
                 self._log_batch(
@@ -3058,7 +3380,7 @@ class PaperScreenerApp(tk.Tk):
                     self._log_batch(f"      {mismatch_note}\n", "err")
 
             except Exception as e:
-                self._log_batch(f"ERROR: {e}\n", "err")
+                self._log_batch(f"ERROR: {_friendly_save_error(e)}\n", "err")
                 n_error += 1
 
             self.after(0, self._update_batch_counts, i + 1, total,
@@ -3160,7 +3482,7 @@ class PaperScreenerApp(tk.Tk):
         hdr.pack_propagate(False)
         tk.Label(hdr, text=f"{sel[0]}  ·  {entry.get('title','(no title)')}",
                  bg=PALETTE["brand"], fg=PALETTE["brand_accent"],
-                 font=("Helvetica", 10, "bold"), anchor="w",
+                 font=(FONT_FAMILY, 10, "bold"), anchor="w",
                  padx=20).pack(fill="both", expand=True)
 
         # Provenance strip
@@ -3270,10 +3592,9 @@ class PaperScreenerApp(tk.Tk):
                 "Settings tab before screening.")
             self.notebook.select(self.tab_config)
             return False
-        if not self._api_key.get().strip():
-            messagebox.showwarning(
-                "API Key Required",
-                "Please enter your Anthropic API key in the Settings tab.")
+        ok, msg = self._current_provider_ready()
+        if not ok:
+            messagebox.showwarning("Model Provider Not Configured", msg)
             self.notebook.select(self.tab_config)
             return False
         if need_pdf and not self._current_pdf_bytes and not self._current_meta_text:

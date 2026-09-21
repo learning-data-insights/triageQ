@@ -25,6 +25,8 @@ example.
 - [Files](#files)
 - [Setup](#setup)
 - [First-time configuration](#first-time-configuration)
+- [Choosing a model provider](#choosing-a-model-provider)
+- [Visual identity](#visual-identity)
 - [Screening criteria](#screening-criteria)
 - [Getting started: your first profile](#getting-started-your-first-profile)
 - [PDF retrieval](#pdf-retrieval)
@@ -42,7 +44,8 @@ example.
 
 ## Files
 
-The application is five Python files that must live in the same folder:
+The application is seven Python files, plus two asset folders, that must all live in the
+same folder:
 
 | File | Contains |
 |------|----------|
@@ -51,10 +54,15 @@ The application is five Python files that must live in the same folder:
 | `pdf_resolver.py` | The online PDF resolution waterfall and abstract-only metadata fallback |
 | `local_library.py` | Local file fingerprinting and file-to-paper matching |
 | `doi_utils.py` | DOI parsing shared by `pdf_resolver.py` and `local_library.py` |
+| `model_providers.py` | Anthropic / OpenAI / OpenAI-compatible provider adapters — see [Choosing a model provider](#choosing-a-model-provider) |
+| `branding.py` | Palette, bundled-font loading, and asset paths — see [Visual identity](#visual-identity) |
+| `fonts/` | Bundled Inter font files (OFL-licensed) |
+| `assets/` | Logo, icon, and Learning Data Insights badge images |
 
 `pdf_resolver.py` and `local_library.py` can also be run directly from the command line for
-testing — see [Troubleshooting](#troubleshooting). `criteria_profiles.py` and `doi_utils.py`
-have no CLI of their own; they're shared dependencies, not tools you run.
+testing — see [Troubleshooting](#troubleshooting). `criteria_profiles.py`, `doi_utils.py`,
+`model_providers.py`, and `branding.py` have no CLI of their own; they're shared
+dependencies, not tools you run.
 
 ---
 
@@ -70,15 +78,21 @@ pip install -r requirements.txt
 
 | Package | Why |
 |---------|-----|
-| `anthropic` | Claude API client |
 | `requests` | HTTP for PDF retrieval |
 | `beautifulsoup4` | Parsing publisher landing pages for PDF links |
-| `pypdf` | Reading a local PDF's first pages to identify which paper it is |
+| `anthropic` | Only needed if you'll use the Anthropic provider |
+| `openai` | Only needed for the OpenAI provider, or the OpenAI-compatible provider (local models, self-hosted servers, any `/chat/completions` endpoint) |
+| `pypdf` | Reading a local PDF's first pages to identify which paper it is, and — for text-only providers — extracting the full text sent for screening |
 | `python-pptx` | Reading PowerPoint decks |
 | `tkinterdnd2` | Optional — drag-and-drop onto the Batch tab |
 
 `beautifulsoup4` is technically optional — the resolver falls back to regex parsing if it
 is missing — but it catches more link patterns, so install it.
+
+`anthropic` and `openai` are each imported lazily, only when you actually select that
+provider in Settings, so it's fine to install just the one you plan to use. Installing both
+is harmless and simplest if you might switch later — the OpenAI-compatible provider (local
+models included) also depends on the `openai` package, since it's the same wire format.
 
 `pypdf` and `python-pptx` are only used by the local file library, but the Batch tab
 imports them at startup, so install both.
@@ -108,15 +122,18 @@ python app.py
 ## First-time configuration
 
 1. Open the **Settings** tab (it scrolls — there are several cards)
-2. Paste your **Anthropic API key** (`sk-ant-...`) in the API Key card
+2. In **Model Provider**, pick Anthropic, OpenAI, or an OpenAI-compatible endpoint, and
+   fill in its key/model (or base URL) fields. See
+   [Choosing a model provider](#choosing-a-model-provider) if you're not sure which
 3. In **Screening Criteria**, create or import your first profile — triageQ ships with none.
    See [Screening criteria](#screening-criteria) below
 4. In the **PDF Retrieval** card, enter a **contact email**. Unpaywall requires one and
    OpenAlex uses it to give you faster responses. Any real address you own is fine
 5. Optionally click **Change** in the Repository card to set a custom save location
 
-**Model:** `claude-opus-4-8`
-**Cost:** ~$0.01–0.03 per paper · 200 papers ≈ $4–6 total
+**Cost:** varies by provider and model — check their pricing page. As a rough baseline,
+Claude Opus ran ~$0.01–0.03 per paper (200 papers ≈ $4–6 total); a local model has no
+per-call cost at all.
 
 ### What persists between sessions
 
@@ -124,10 +141,123 @@ Settings are saved to `~/.triageq_settings.json`:
 
 - Repository location
 - Active criteria profile
+- Which provider is selected, and its model name (and base URL, for OpenAI-compatible)
 - All PDF retrieval settings, including the contact email
 - Abstract-only fallback on/off
 
-**The API key is never written to disk.** You re-enter it each session.
+**API keys are never written to disk.** Each provider has its own key field, held only in
+memory, and you re-enter it each session — switching providers mid-session doesn't lose
+whatever you'd already typed into the other one, but restarting the app does.
+
+---
+
+## Choosing a model provider
+
+triageQ's prompts are plain text — nothing about the criteria compiler or the screening
+prompt is written for any one model. What differs between providers is how the request is
+shaped, and whether the provider can read a PDF **natively**.
+
+### PDF vision vs. text extraction
+
+Reading a PDF "natively" means the model sees the paper's own layout — figures, tables,
+multi-column text — the way you would looking at the page. That matters for papers where
+the evidence lives in a table or a chart rather than a sentence.
+
+| Provider | PDF vision | What happens instead if not |
+|----------|:----------:|------------------------------|
+| **Anthropic** | ✓ | — |
+| **OpenAI** | ✓ (vision-capable models only) | — |
+| **OpenAI-compatible** (local models, self-hosted servers, other aggregators) | ✗ | triageQ extracts the PDF's text locally with `pypdf` and screens from that instead |
+
+The OpenAI-compatible option exists specifically because there's no reliable, universal way
+to send a PDF to an arbitrary `/chat/completions` server — some hosted aggregators pass
+one through, most self-hosted model servers don't implement anything like it at all. Rather
+than guess at a given server's capabilities, triageQ treats every OpenAI-compatible
+endpoint as text-only and is upfront about it: the **Model Provider** card in Settings
+shows a live note on whether the active provider has PDF vision, and every screened record
+carries a `pdf_vision_used` column (`yes` / `no` / blank if no PDF was ever involved) so
+you can always tell which papers were read natively and which were screened from extracted
+text.
+
+Text extraction is a real degradation for tables and figures, but it is not a silent one,
+and abstracts/full running text extract cleanly either way. A scanned PDF with no text
+layer can't be screened by a text-only provider at all — you'll get a clear error rather
+than an empty or wrong result.
+
+### Anthropic
+
+The original, and the only provider tested against the built-in decision-rule engine during
+development. Get a key at console.anthropic.com → API Keys.
+
+### OpenAI
+
+Enter your API key and a vision-capable model name (check
+platform.openai.com/docs/models for what's current — triageQ doesn't pin a default, since
+model availability changes independently of this tool).
+
+### OpenAI-compatible
+
+Any server implementing OpenAI's `/chat/completions` API. Fill in:
+
+- **Base URL** — e.g. `http://localhost:11434/v1` for Ollama's OpenAI-compatible endpoint,
+  `http://localhost:8000/v1` for a typical vLLM server, or a hosted aggregator's endpoint
+  (OpenRouter, Together, Groq, etc.)
+- **API key** — many local servers ignore this entirely; leave it blank and triageQ sends a
+  placeholder so the request still goes through
+- **Model** — whatever name your endpoint expects
+
+Because this path is text-only, a local model with a reasonably large context window
+matters more here than it does for the vision providers — you're sending the paper's full
+extracted text, not a compact document reference.
+
+---
+
+## Visual identity
+
+triageQ's colors, logo, icon, and typography come from a reference brand sheet and are
+implemented in `branding.py`, not hardcoded inline in `app.py`.
+
+### Palette
+
+| Color | Hex | Used for |
+|-------|-----|----------|
+| Deep Blue | `#244467` | Chrome — the header rule and every dialog's title bar |
+| Brand Blue | `#367EC5` | Primary buttons and interactive accents |
+| Teal | `#4B9F87` | Informational console tags |
+| Amber | `#EFBC54` | Accent text/fills on dark bars, selection, progress — kept separate from verdict amber |
+| Lavender | `#9E92C7` | "Read this, it needs judgment" callouts — currently just the criteria compiler's notes banner |
+
+**Verdict colors (INCLUDE/EXCLUDE/MANUAL_REVIEW green/red/amber) are deliberately not part
+of this palette swap.** They keep their original stoplight meaning — instant legibility
+mattered more there than palette purity.
+
+### Typography
+
+Inter, per the brand sheet. There's no such thing as a live CDN font link in a Tkinter
+desktop app — the equivalent here is bundling the actual font files
+(`fonts/Inter.ttf`, `fonts/Inter-Italic.ttf`, OFL-licensed, see `fonts/OFL.txt`) and loading
+them for the running process only.
+
+- **Windows:** loaded privately at startup (`AddFontResourceExW`, `FR_PRIVATE`) — no
+  install, no admin rights, nothing left behind when the app closes.
+- **macOS / Linux:** not implemented in this reference build. `branding.py` checks whether
+  Inter is already installed system-wide and uses it if so; otherwise it falls back to a
+  close system font (Helvetica Neue on macOS, generic Helvetica elsewhere) rather than
+  failing. Installing Inter system-wide (fonts.google.com/specimen/Inter) gets you the
+  exact typography on these platforms too.
+
+Either way, `branding.resolve_font_family()` always returns something usable, and every
+font reference in the app reads from that one resolved value — nothing hard-fails on a
+missing font.
+
+### Logo, icon, and attribution
+
+`assets/logo.png` (the header wordmark) and `assets/icon.ico` / `icon_256.png` (window and
+taskbar icon) are generated from the reference brand sheet. The wordmark's background was
+keyed transparent for the header; the icon was rendered at seven sizes into one `.ico` for
+crisp taskbar display. `assets/ldi_badge_28.png` and `ldi_badge_44.png` are the Learning
+Data Insights mark (a navy circle with a white waveform icon, transparent padding) resized
+for the header and About-card contexts it appears in.
 
 ---
 
@@ -135,7 +265,7 @@ Settings are saved to `~/.triageq_settings.json`:
 
 Criteria are no longer hardcoded. Each review is a **criteria profile** — a structured
 definition of its criteria, boundary rules, decision logic, and output shape. The system
-prompt, the JSON schema Claude returns, the repository columns, and the decision rules are
+prompt, the JSON schema the model returns, the repository columns, and the decision rules are
 all generated from the active profile.
 
 triageQ ships with **no profile of its own**. Every review's criteria are something you
@@ -150,10 +280,10 @@ what you are screening against.
 ### Creating a profile from your own criteria
 
 Click **New from Text…**, paste your inclusion and exclusion criteria — a protocol excerpt,
-a PICO statement, or plain prose — and click **Compile with Claude**. You can also load a
+a PICO statement, or plain prose — and click **Compile Criteria**. You can also load a
 `.txt`, `.md`, or `.docx` file into the box first.
 
-Claude converts the text into a structured profile and shows it for review before it can
+Your configured model converts the text into a structured profile and shows it for review before it can
 screen anything. **This review step is deliberate and not skippable.**
 
 Here is why. Free-text criteria almost always state what to *include* and leave what to
@@ -202,7 +332,7 @@ instructed to do.
 ### Decision rules are enforced locally
 
 After every API call, the tool recomputes the recommendation from the criterion verdicts
-using the profile's decision rules. If Claude's own `overall_recommendation` disagrees, the
+using the profile's decision rules. If the model's own `overall_recommendation` disagrees, the
 locally computed value wins and the correction is recorded in `additional_notes` and shown
 in the results panel.
 
@@ -228,7 +358,7 @@ using a quantitative outcome measure."
    > involved, studies with only qualitative or perception-based outcomes, and vendor
    > white papers.
 
-3. Click **Compile with Claude**. It returns a structured draft — likely two criteria
+3. Click **Compile Criteria**. It returns a structured draft — likely two criteria
    ("Named Tool Evaluated" and "Quantitative Outcome Measure") — each with explicit
    `include_if` and `exclude_if` conditions, plus a list of **compiler notes**: exclusion
    rules it inferred that weren't in your original text (for example, excluding studies
@@ -565,7 +695,7 @@ Default location `~/triageq/`:
 
 ```
 ~/triageq/
-  paper_repository.json              ← Full data including complete Claude analysis
+  paper_repository.json              ← Full data including the complete model analysis
   paper_repository.csv               ← All papers, base columns + criteria_summary
   repository_<profile_id>.csv        ← One per profile, with that profile's criteria columns
   batch_template.csv                 ← Template for batch uploads
@@ -664,7 +794,7 @@ the abstract.
 | `pdf_source` | Which resolution step found the PDF (e.g. `Unpaywall`, `manual upload`) |
 | `pdf_url` | The resolved PDF URL, when there was one |
 | `analyzed_at` | Timestamp |
-| `model_used` | Claude model version |
+| `model_used` | Provider and model that screened this paper, e.g. `Anthropic: claude-opus-4-8` |
 
 ### Generated from the profile
 
@@ -831,6 +961,20 @@ python pdf_resolver.py 10.7717/peerj.4375 you@example.com
 ```
 
 **API errors**
-`authentication_error` means the key is wrong or expired. `rate_limit_error` means slow down
-or check your account limits. `credit balance is too low` means add credits at
-console.anthropic.com → Billing.
+Messages vary by provider, but the causes are the same everywhere: `authentication_error` /
+`401` means the key is wrong, expired, or (for OpenAI-compatible) not what the endpoint
+expects. `rate_limit_error` / `429` means slow down or check your account's limits.
+Anthropic's `credit balance is too low` means add credits at console.anthropic.com →
+Billing; OpenAI's equivalent is under platform.openai.com → Billing.
+
+**"This provider does not support native PDF input" / a caller-bug ProviderError**
+This should never surface in normal use — the app checks a provider's PDF-vision support
+before deciding whether to extract text first. If you see it, it means a PDF reached a
+text-only provider unextracted; treat it as a bug report.
+
+**OpenAI-compatible: connection refused, or the wrong model answers**
+Check the base URL includes the right path (most local servers use `/v1`, e.g.
+`http://localhost:11434/v1`, not just `http://localhost:11434`), and that the model name
+matches exactly what the server has loaded — most servers reject an unrecognized model
+name outright, but a couple silently fall back to whatever's loaded, which looks like the
+model ignoring your criteria rather than a naming mismatch.
