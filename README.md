@@ -1,7 +1,7 @@
 # triageQ
 
 An open, human-in-the-loop tool for sorting large volumes of content against custom
-criteria. Licensed CC BY-SA 4.0.
+criteria. Licensed Apache 2.0.
 
 This reference build screens academic papers, returning an **INCLUDE / EXCLUDE /
 MANUAL_REVIEW** recommendation for each one, with per-criterion verdicts, supporting
