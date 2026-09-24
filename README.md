@@ -38,6 +38,7 @@ example.
 - [Confidence levels](#confidence-levels)
 - [Output fields](#output-fields)
 - [Criteria profile schema reference](#criteria-profile-schema-reference)
+- [Example profile](#example-profile)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -871,6 +872,18 @@ In the built-in profile, `domains_identified` is a required closed-list tag fiel
 Use when a criterion has two or more independently sufficient routes to YES. Each group is
 `{ "label": "...", "items": [...] }`. The built-in profile's Criterion 3 uses this for
 Path A and Path B.
+
+---
+
+## Example profile
+
+[`criteria-profiles/genai-evidence-hub-profile.json`](criteria-profiles/genai-evidence-hub-profile.json)
+is a complete profile from the GenAI Evidence Hub systematic review, included as a
+worked example of the schema above. It has three criteria, one with a required closed-list
+`tag_field` (`domains_identified`) and one using `include_if_groups` for two independently
+sufficient evaluation paths (direct output metrics vs. outcome-based evidence). Import it
+directly via **Import File…**, or read it alongside the schema reference to see the fields
+in context.
 
 ---
 
