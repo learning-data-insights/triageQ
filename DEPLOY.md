@@ -220,7 +220,6 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 cd ~
 git clone https://github.com/learning-data-insights/triageQ.git
 cd triageQ
-git checkout web-deploy     # until this branch is merged into main
 ```
 
    The repository is public, so no GitHub login is needed.
