@@ -155,14 +155,36 @@ def _is_pdf(content: bytes, content_type: str = "", url: str = "") -> bool:
 
 
 
+# Optional callable(url) that raises for a URL this process must not fetch.
+# None on the desktop. The hosted web build sets it to net_guard.check_url, and
+# redirects are then followed hop by hop so every hop gets checked — a public
+# URL can redirect to a private address.
+URL_GUARD = None
+MAX_REDIRECTS = 10
+
+
 def _get(cfg: ResolverConfig, url: str, *, stream: bool = False,
          accept_pdf: bool = False) -> requests.Response:
     _throttle(cfg.request_delay)
     h = _headers(cfg)
     if accept_pdf:
         h["Accept"] = "application/pdf,*/*"
-    return requests.get(url, headers=h, timeout=cfg.timeout,
-                        allow_redirects=True, stream=stream)
+    if URL_GUARD is None:
+        return requests.get(url, headers=h, timeout=cfg.timeout,
+                            allow_redirects=True, stream=stream)
+
+    for _ in range(MAX_REDIRECTS + 1):
+        try:
+            URL_GUARD(url)
+        except ValueError as exc:
+            raise requests.exceptions.InvalidURL(f"blocked: {exc}") from exc
+        resp = requests.get(url, headers=h, timeout=cfg.timeout,
+                            allow_redirects=False, stream=stream)
+        if not resp.is_redirect:
+            return resp
+        url = urljoin(resp.url, resp.headers["location"])
+        resp.close()
+    raise requests.exceptions.TooManyRedirects(f"more than {MAX_REDIRECTS} redirects")
 
 
 def _download_pdf(cfg: ResolverConfig, url: str) -> tuple[bytes | None, str]:

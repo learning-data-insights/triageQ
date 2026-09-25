@@ -1,0 +1,20 @@
+[server]
+headless = true
+# Production: no hot-reload.
+fileWatcherType = "none"
+# Overridden by STREAMLIT_SERVER_MAX_UPLOAD_SIZE (set from TRIAGEQ_MAX_UPLOAD_MB
+# in docker-compose.yml). Megabytes, per file.
+maxUploadSize = 25
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#367EC5"
+backgroundColor = "#F7F8FA"
+secondaryBackgroundColor = "#EEF1F5"
+textColor = "#1B2733"

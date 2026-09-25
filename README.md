@@ -23,6 +23,7 @@ example.
 ## Contents
 
 - [Files](#files)
+- [Hosted web build](#hosted-web-build)
 - [Setup](#setup)
 - [First-time configuration](#first-time-configuration)
 - [Choosing a model provider](#choosing-a-model-provider)
@@ -57,6 +58,7 @@ same folder:
 | `doi_utils.py` | DOI parsing shared by `pdf_resolver.py` and `local_library.py` |
 | `model_providers.py` | Anthropic / OpenAI / OpenAI-compatible provider adapters — see [Choosing a model provider](#choosing-a-model-provider) |
 | `branding.py` | Palette, bundled-font loading, and asset paths — see [Visual identity](#visual-identity) |
+| `screening.py` | The analysis call, repository record construction, and repository read/write — shared by the desktop and web front ends |
 | `fonts/` | Bundled Inter font files (OFL-licensed) |
 | `assets/` | Logo, icon, and Learning Data Insights badge images |
 
@@ -64,6 +66,29 @@ same folder:
 testing — see [Troubleshooting](#troubleshooting). `criteria_profiles.py`, `doi_utils.py`,
 `model_providers.py`, and `branding.py` have no CLI of their own; they're shared
 dependencies, not tools you run.
+
+The hosted web build adds `web_app.py`, `web_backend.py`, and `net_guard.py` — see
+[Hosted web build](#hosted-web-build).
+
+---
+
+## Hosted web build
+
+`web_app.py` is a browser front end (Streamlit) over the same screening engine, for
+running triageQ as a public reference deployment. Each visitor gets a private, temporary
+workspace; they paste their own API key or use an optional, capped organisation key.
+Local-folder scanning is replaced by uploads. Everything is configured through
+environment variables — see `.env.example`.
+
+| File | Contains |
+|------|----------|
+| `web_app.py` | The web UI. Run with `streamlit run web_app.py` |
+| `web_backend.py` | Workspaces, limits, demo-key quota, background batch jobs, expiry cleanup |
+| `net_guard.py` | Refuses outbound requests to private/internal addresses on a public server |
+| `requirements-web.txt` | Web dependencies (no Tkinter needed) |
+| `Dockerfile`, `docker-compose.yml`, `Caddyfile` | Container build, plus Caddy for automatic HTTPS |
+
+**[DEPLOY.md](DEPLOY.md)** walks through hosting it on AWS Lightsail step by step.
 
 ---
 

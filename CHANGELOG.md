@@ -6,6 +6,26 @@ chat history. Dates reflect when each round of work took place.
 
 ---
 
+## 1.3.0 — Hosted web build
+**2026-09-25**
+
+- **New browser front end (`web_app.py`, Streamlit)** for running triageQ as a public
+  reference deployment. Same screening engine, same repository format as the desktop app
+- **Per-visitor workspaces** — a random id in the page URL, deleted after 24 h without use
+  (configurable) or immediately via **Clear my session**; **Download all results (.zip)**
+- **Bring your own key, or a capped organisation "demo" key** — fixed model, daily caps
+  for everyone combined and per visitor (workspace + IP)
+- **Limits** on batch size, file size, workspace size, concurrent screenings, and free disk
+- **Outbound URL guard (`net_guard.py`)** — on a public server every visitor-supplied link,
+  and every redirect hop, is checked against private/internal addresses. Off on the desktop
+- **Refactor:** the analysis call, record construction, and repository read/write moved
+  from `app.py` into `screening.py` so both front ends share one implementation. The desktop
+  app's behavior is unchanged
+- **Deployment:** `Dockerfile`, `docker-compose.yml` with Caddy for automatic HTTPS, and
+  `DEPLOY.md`, a step-by-step AWS Lightsail guide
+
+---
+
 ## 1.2.1 — Header fixes and a better LDI mark
 **2026-09-21**
 

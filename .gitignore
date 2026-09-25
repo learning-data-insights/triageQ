@@ -1,0 +1,4 @@
+# Hosted web build
+.env
+web_data/
+__pycache__/

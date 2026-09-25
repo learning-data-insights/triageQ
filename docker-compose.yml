@@ -1,0 +1,38 @@
+# triageQ hosted web build: the app, plus Caddy in front for automatic HTTPS.
+# Settings come from .env (copy .env.example). See DEPLOY.md.
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}   # logs can't fill the disk
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      STREAMLIT_SERVER_MAX_UPLOAD_SIZE: ${TRIAGEQ_MAX_UPLOAD_MB:-25}
+    volumes:
+      - triageq-data:/data
+    logging: *logging
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      TRIAGEQ_DOMAIN: ${TRIAGEQ_DOMAIN:?set TRIAGEQ_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+    logging: *logging
+
+volumes:
+  triageq-data:
+  caddy-data:
+  caddy-config:
