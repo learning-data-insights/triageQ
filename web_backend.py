@@ -93,9 +93,9 @@ class Config:
             data_dir=Path(os.environ.get("TRIAGEQ_DATA_DIR", "").strip()
                           or Path(__file__).parent / "web_data"),
             contact_email=os.environ.get("TRIAGEQ_CONTACT_EMAIL", "").strip(),
-            max_batch_rows=_env_int("TRIAGEQ_MAX_BATCH_ROWS", 50),
+            max_batch_rows=_env_int("TRIAGEQ_MAX_BATCH_ROWS", 10),
             max_upload_mb=_env_int("TRIAGEQ_MAX_UPLOAD_MB", 25),
-            max_workspace_mb=_env_int("TRIAGEQ_MAX_WORKSPACE_MB", 100),
+            max_workspace_mb=_env_int("TRIAGEQ_MAX_WORKSPACE_MB", 30),
             max_concurrent_jobs=_env_int("TRIAGEQ_MAX_CONCURRENT_JOBS", 3),
             workspace_ttl_hours=_env_int("TRIAGEQ_WORKSPACE_TTL_HOURS", 24),
             min_free_disk_pct=_env_int("TRIAGEQ_MIN_FREE_DISK_PCT", 15),
