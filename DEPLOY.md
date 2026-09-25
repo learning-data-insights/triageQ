@@ -214,15 +214,12 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 ```bash
 cd ~
-git clone https://github.com/<org>/triageQ.git
+git clone https://github.com/learning-data-insights/triageQ.git
 cd triageQ
 git checkout web-deploy     # until this branch is merged into main
 ```
 
-   If the repository is **private**, GitHub will ask for a password. Use a
-   *fine-grained personal access token* with read-only **Contents** access to
-   just this repo (GitHub → Settings → Developer settings → Fine-grained
-   tokens), pasted in place of the password.
+   The repository is public, so no GitHub login is needed.
 
 2. **Create `.env`** from the template and edit it:
 
