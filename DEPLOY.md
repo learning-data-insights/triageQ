@@ -135,10 +135,14 @@ For each provider you want to offer as a demo:
 
 1. Open <https://lightsail.aws.amazon.com> and click **Create instance**.
 2. **Region:** pick one close to your users (for example *Virginia, us-east-1*).
-3. **Platform:** Linux/Unix. **Blueprint:** *OS Only* → **Ubuntu 24.04 LTS**.
-4. **Plan:** choose the **2 GB RAM** plan. 1 GB is too tight once a few PDFs are
+3. **Select a platform:** **Linux operating system**. Not *Linux apps*, which is
+   selected by default and preinstalls software like WordPress that would get in
+   the way. **Select a blueprint:** **Ubuntu 24.04 LTS**.
+4. **Networking type:** **Dual-stack**, not IPv6-only. The domain setup in
+   Step 5 needs an IPv4 address.
+5. **Plan:** choose the **2 GB RAM** plan. 1 GB is too tight once a few PDFs are
    being processed at the same time.
-5. **Name:** `triageq`. Click **Create instance**, then wait about a minute for
+6. **Name:** `triageq`. Click **Create instance**, then wait about a minute for
    it to show *Running*.
 
 ---
