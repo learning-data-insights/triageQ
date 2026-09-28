@@ -6,6 +6,30 @@ chat history. Dates reflect when each round of work took place.
 
 ---
 
+## 1.3.0 — Paper ID no longer required for single-paper analysis
+**2026-09-28**
+
+Reported inconsistency: batch analysis auto-assigns a paper ID to any row that doesn't
+have one (`PAPER_<row number>`), but the Single Paper tab blocked analysis outright with
+a "Please enter a Paper ID" warning if the field was left blank.
+
+- **Single Paper now matches batch's behavior.** An empty Paper ID field no longer blocks
+  analysis — one is auto-assigned (`PAPER_<timestamp>`, e.g. `PAPER_20260928174914`) and
+  written back into the field so it's visible before and after the run, the same way a
+  batch row's assigned ID is visible in the batch log. An explicitly entered ID is still
+  used exactly as before; nothing changes for anyone already typing one in
+  - A timestamp rather than batch's row-position scheme, since a single ad-hoc analysis has
+    no "row" to count from — down-to-the-second precision makes collisions effectively a
+    non-issue for one-at-a-time use
+- Updated the field's hint text ("Optional — auto-assigned if left blank...") and the
+  README's single-paper walkthrough to match
+- Tested directly: confirmed a blank field no longer triggers the warning dialog, the
+  auto-generated ID is what actually gets passed to the analysis worker, the field reflects
+  it back to the user, and an explicitly-entered ID is still respected unchanged — then
+  re-ran the full existing test suite to confirm nothing else broke
+
+---
+
 ## 1.2.1 — Header fixes and a better LDI mark
 **2026-09-21**
 

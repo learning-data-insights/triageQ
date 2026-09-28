@@ -1,5 +1,5 @@
 """
-triageQ  (v1.2.1)
+triageQ  (v1.3.0)
 
 An open, human-in-the-loop tool for sorting large volumes of content against
 custom criteria. triageQ ships with no built-in criteria of its own — every
@@ -124,7 +124,7 @@ except Exception:                                    # pragma: no cover
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 APP_TITLE = "triageQ"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 SETTINGS_FILE = Path.home() / ".triageq_settings.json"
 
 REPO_DIR = Path.home() / "triageq"
@@ -820,7 +820,8 @@ class PaperScreenerApp(tk.Tk):
                             highlightcolor=PALETTE["ink"], width=22)
         id_entry.pack(side="left", ipady=6, padx=(0, 16))
 
-        tk.Label(id_row, text="All other metadata is extracted automatically from the PDF.",
+        tk.Label(id_row, text="Optional — auto-assigned if left blank. All other metadata "
+                              "is extracted automatically from the PDF.",
                  bg=PALETTE["surface"], fg=PALETTE["ink_faint"],
                  font=(FONT_FAMILY, 8, "italic")).pack(side="left")
 
@@ -2932,8 +2933,12 @@ class PaperScreenerApp(tk.Tk):
             return
         paper_id = self._paper_id_var.get().strip()
         if not paper_id:
-            messagebox.showwarning("Missing ID", "Please enter a Paper ID.")
-            return
+            # Same spirit as batch's fallback (an unset row gets "PAPER_<n>")
+            # — don't block on an ID nobody's required to think up. Shown
+            # back in the field so it's visible before/after the run, same
+            # as a batch row's assigned ID is visible in the log.
+            paper_id = "PAPER_" + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            self._paper_id_var.set(paper_id)
         self._set_busy(True)
         self._set_progress("Starting analysis…")
         self._single_timer_label.config(text="")

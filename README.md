@@ -1,7 +1,7 @@
 # triageQ
 
 An open, human-in-the-loop tool for sorting large volumes of content against custom
-criteria. Licensed Apache 2.0.
+criteria. Licensed CC BY-SA 4.0.
 
 This reference build screens academic papers, returning an **INCLUDE / EXCLUDE /
 MANUAL_REVIEW** recommendation for each one, with per-criterion verdicts, supporting
@@ -38,7 +38,6 @@ example.
 - [Confidence levels](#confidence-levels)
 - [Output fields](#output-fields)
 - [Criteria profile schema reference](#criteria-profile-schema-reference)
-- [Example profile](#example-profile)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -632,7 +631,9 @@ the feature degrades rather than presenting a zone that silently does nothing.
 
 1. Go to the **Single Paper** tab
 2. Confirm the criteria profile shown at the top is the one you want
-3. Enter a **Paper ID** (required — the unique identifier in the repository)
+3. Optionally enter a **Paper ID** — the unique identifier in the repository. Leave it
+   blank and one is auto-assigned (`PAPER_<timestamp>`), the same way an unset row in a
+   batch CSV gets `PAPER_<row number>` rather than blocking the run
 4. Either:
    - Paste a **DOI, publisher link, arXiv ID, or direct PDF URL** and click **Find PDF**
    - Or click **Upload PDF** to load a local file
@@ -640,7 +641,9 @@ the feature degrades rather than presenting a zone that silently does nothing.
 6. Results appear below and are saved to the repository automatically
 
 All metadata (title, authors, year, journal, DOI, abstract) is extracted from the PDF — no
-manual entry beyond the Paper ID.
+manual entry required at all. If you do want a specific Paper ID (to match an existing
+review's numbering, for example), enter it before analyzing; re-analyzing with the same ID
+later overwrites that record rather than creating a duplicate.
 
 ---
 
@@ -872,18 +875,6 @@ In the built-in profile, `domains_identified` is a required closed-list tag fiel
 Use when a criterion has two or more independently sufficient routes to YES. Each group is
 `{ "label": "...", "items": [...] }`. The built-in profile's Criterion 3 uses this for
 Path A and Path B.
-
----
-
-## Example profile
-
-[`criteria-profiles/genai-evidence-hub-profile.json`](criteria-profiles/genai-evidence-hub-profile.json)
-is a complete profile from the GenAI Evidence Hub systematic review, included as a
-worked example of the schema above. It has three criteria, one with a required closed-list
-`tag_field` (`domains_identified`) and one using `include_if_groups` for two independently
-sufficient evaluation paths (direct output metrics vs. outcome-based evidence). Import it
-directly via **Import File…**, or read it alongside the schema reference to see the fields
-in context.
 
 ---
 
