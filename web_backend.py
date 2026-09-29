@@ -76,8 +76,8 @@ class Config:
     allow_custom_endpoint: bool
     hosted_keys: dict          # provider -> api key
     hosted_models: dict        # provider -> model name
-    hosted_daily_total: int
-    hosted_daily_per_visitor: int
+    hosted_daily_total: int          # papers per day, everyone combined
+    hosted_daily_runs: int           # runs per visitor per day
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -103,7 +103,7 @@ class Config:
             hosted_keys=hosted_keys,
             hosted_models=hosted_models,
             hosted_daily_total=_env_int("TRIAGEQ_HOSTED_DAILY_TOTAL", 300),
-            hosted_daily_per_visitor=_env_int("TRIAGEQ_HOSTED_DAILY_PER_VISITOR", 50),
+            hosted_daily_runs=_env_int("TRIAGEQ_HOSTED_DAILY_RUNS_PER_VISITOR", 5),
         )
 
     def resolver_config(self) -> pr.ResolverConfig:
@@ -344,12 +344,18 @@ def purge_expired(cfg: Config, busy_ids: set | None = None) -> list[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class Quota:
-    """Daily model-call caps for the organisation's own keys.
+    """Daily caps for the organisation's own ("demo") keys.
 
-    Counted per server, per workspace, and per client IP — the IP cap is what
-    stops "clear session, get a fresh allowance" from working. A call is
-    counted when it is reserved, before it is made, and a failed call is not
-    refunded: the provider may still have billed it. Counters reset at
+    Visitors get a number of RUNS per day: a run is one batch (up to
+    max_batch_rows papers) or one single-paper analysis. Runs are counted per
+    workspace and per client IP — the IP count is what stops "clear session,
+    get a fresh allowance" from working. Separately, every model call (every
+    paper, and every criteria compile) counts toward a server-wide daily
+    total, the backstop on what the demo can cost.
+
+    A run is counted when its first model call is made, not when it's
+    started, so a batch that finds no PDFs uses nothing. Nothing is refunded
+    for a failed call: the provider may still have billed it. Counters reset at
     midnight UTC. These are a courtesy limit, not a billing control; the hard
     ceiling is the spending limit set in the provider's own console.
     """
@@ -364,38 +370,57 @@ class Quota:
 
     def _load(self) -> dict:
         try:
-            return json.loads(self._path().read_text(encoding="utf-8"))
+            u = json.loads(self._path().read_text(encoding="utf-8"))
         except Exception:
-            return {"total": 0, "workspace": {}, "ip": {}}
+            u = {}
+        u.setdefault("total", 0)
+        u.setdefault("runs_workspace", {})
+        u.setdefault("runs_ip", {})
+        return u
 
-    def remaining(self, ws_id: str, ip: str) -> int:
+    def _save(self, u: dict):
+        self.cfg.usage_dir().mkdir(parents=True, exist_ok=True)
+        self._path().write_text(json.dumps(u), encoding="utf-8")
+
+    def runs_left(self, ws_id: str, ip: str) -> int:
         with self._lock:
             u = self._load()
-        return max(0, min(
-            self.cfg.hosted_daily_total - u["total"],
-            self.cfg.hosted_daily_per_visitor - u["workspace"].get(ws_id, 0),
-            self.cfg.hosted_daily_per_visitor - u["ip"].get(ip, 0),
-        ))
+        used = max(u["runs_workspace"].get(ws_id, 0), u["runs_ip"].get(ip, 0))
+        return max(0, self.cfg.hosted_daily_runs - used)
 
-    def reserve(self, ws_id: str, ip: str) -> str | None:
-        """Count one call. Returns None if allowed, else a reason to show."""
-        with self._lock:
-            u = self._load()
-            if u["total"] >= self.cfg.hosted_daily_total:
-                return ("The shared demo key has reached today's limit for everyone. "
-                        "Use your own API key, or try again tomorrow (resets at 00:00 UTC).")
-            if (u["workspace"].get(ws_id, 0) >= self.cfg.hosted_daily_per_visitor
-                    or u["ip"].get(ip, 0) >= self.cfg.hosted_daily_per_visitor):
-                return (f"You've used today's {self.cfg.hosted_daily_per_visitor} demo-key "
-                        "papers (the allowance is shared by everyone on your network "
-                        "connection). Use your own API key to keep going, or come back "
-                        "tomorrow (resets at 00:00 UTC).")
-            u["total"] += 1
-            u["workspace"][ws_id] = u["workspace"].get(ws_id, 0) + 1
-            u["ip"][ip] = u["ip"].get(ip, 0) + 1
-            self.cfg.usage_dir().mkdir(parents=True, exist_ok=True)
-            self._path().write_text(json.dumps(u), encoding="utf-8")
-            return None
+    def _total_reason(self, u: dict) -> str | None:
+        if u["total"] >= self.cfg.hosted_daily_total:
+            return ("The shared demo key has reached today's limit for everyone. "
+                    "Use your own API key, or try again tomorrow (resets at 00:00 UTC).")
+        return None
+
+    def gate(self, ws_id: str, ip: str, counts_run: bool = True):
+        """A check to call before each model call of ONE run. Returns None if
+        the call may go ahead, else a reason to show. The first call uses up
+        one of the visitor's runs (unless counts_run is False, as for a
+        criteria compile); every call counts toward the server total."""
+        state = {"run_counted": not counts_run}
+
+        def check() -> str | None:
+            with self._lock:
+                u = self._load()
+                reason = self._total_reason(u)
+                if reason:
+                    return reason
+                if not state["run_counted"]:
+                    used = max(u["runs_workspace"].get(ws_id, 0), u["runs_ip"].get(ip, 0))
+                    if used >= self.cfg.hosted_daily_runs:
+                        return (f"You've used today's {self.cfg.hosted_daily_runs} demo runs "
+                                "(they're shared by everyone on your network connection). "
+                                "Use your own API key to keep going, or come back tomorrow "
+                                "(resets at 00:00 UTC).")
+                    u["runs_workspace"][ws_id] = u["runs_workspace"].get(ws_id, 0) + 1
+                    u["runs_ip"][ip] = u["runs_ip"].get(ip, 0) + 1
+                    state["run_counted"] = True
+                u["total"] += 1
+                self._save(u)
+                return None
+        return check
 
 
 class QuotaExceeded(Exception):

@@ -143,12 +143,13 @@ def _sidebar_provider():
         provs = list(CFG.hosted_keys)
         prov = st.sidebar.selectbox("Provider", provs, key="demo_provider",
                                     format_func=lambda p: mp.PROVIDER_LABELS[p])
-        left = QUOTA.remaining(WS.id, client_ip())
+        left = QUOTA.runs_left(WS.id, client_ip())
         st.sidebar.caption(
             f"Model: **{CFG.hosted_models[prov]}**  \n"
-            f"Demo papers left today: **{left} of {CFG.hosted_daily_per_visitor}**  \n"
-            "Each paper screened (or criteria compile) uses one. The allowance is shared "
-            "with anyone on the same network connection and resets at 00:00 UTC.")
+            f"Demo runs left today: **{left} of {CFG.hosted_daily_runs}**  \n"
+            f"A run is one batch (up to {CFG.max_batch_rows} papers) or one single-paper "
+            "analysis. Runs are shared with anyone on the same network connection and "
+            "reset at 00:00 UTC.")
         return
 
     provs = ["anthropic", "openai"] + (["openai_compatible"] if CFG.allow_custom_endpoint else [])
@@ -170,14 +171,16 @@ def _sidebar_provider():
                            "and sent instead (tables and figures are lost).")
 
 
-def provider_setup() -> tuple[mp.ProviderConfig | None, object, str]:
-    """(config, quota gate or None, error message). config is None on error."""
+def provider_setup(counts_run: bool = True) -> tuple[mp.ProviderConfig | None, object, str]:
+    """(config, quota gate or None, error message). config is None on error.
+    Call once per run: each call's gate counts as a new demo run (unless
+    counts_run is False)."""
     if ss.get("key_source") == KEY_DEMO and CFG.hosted_keys:
         prov = ss.get("demo_provider") or next(iter(CFG.hosted_keys))
         cfg = mp.ProviderConfig(provider=prov, api_key=CFG.hosted_keys[prov],
                                 model=CFG.hosted_models[prov])
         ws_id, ip = WS.id, client_ip()
-        return cfg, (lambda: QUOTA.reserve(ws_id, ip)), ""
+        return cfg, QUOTA.gate(ws_id, ip, counts_run=counts_run), ""
 
     prov = ss.get("own_provider", "anthropic")
     key = (ss.get(f"own_key_{prov}") or "").strip()
@@ -198,11 +201,11 @@ def provider_setup() -> tuple[mp.ProviderConfig | None, object, str]:
 
 
 
-def demo_left() -> int | None:
-    """Demo papers this visitor has left today, or None when not on the demo key.
-    One paper screened, or one criteria compile, uses one."""
+def demo_runs_left() -> int | None:
+    """Demo runs this visitor has left today, or None when not on the demo key.
+    A run is one batch or one single-paper analysis."""
     if ss.get("key_source") == KEY_DEMO and CFG.hosted_keys:
-        return QUOTA.remaining(WS.id, client_ip())
+        return QUOTA.runs_left(WS.id, client_ip())
     return None
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -480,12 +483,11 @@ def tab_criteria():
                      label_visibility="collapsed",
                      placeholder="Include studies that… Exclude studies that…")
         compile_clicked = st.button("Compile criteria", type="primary")
-        left = demo_left()
-        if left is not None:
-            st.caption(f"Uses 1 of your {left} demo paper(s) left today.")
+        if demo_runs_left() is not None:
+            st.caption("Compiling criteria doesn't use a demo run.")
         if compile_clicked:
             raw = (ss.get("criteria_text") or "").strip()
-            pcfg, gate, err = provider_setup()
+            pcfg, gate, err = provider_setup(counts_run=False)
             if not raw:
                 st.error("Paste or load some criteria text first.")
             elif err:
@@ -613,10 +615,10 @@ def tab_single():
         with st.expander("Retrieval trail"):
             st.code("\n".join(trail[1]), language=None)
 
-    left = demo_left()
+    left = demo_runs_left()
     clicked = st.button("Analyze paper", type="primary", disabled=want is None)
     if left is not None:
-        st.caption(f"Uses 1 of your {left} demo paper(s) left today.")
+        st.caption(f"Uses 1 of your {left} demo run(s) left today.")
     if clicked:
         pcfg, gate, err = provider_setup()
         if err:
@@ -709,8 +711,8 @@ def tab_batch():
         return
 
     st.markdown(
-        f"1. Download the template and fill in one paper per row (up to "
-        f"**{CFG.max_batch_rows}** rows).  \n"
+        f"1. Download the template and fill in one paper per row "
+        f"(**up to {CFG.max_batch_rows} papers per run**).  \n"
         "2. Each row needs a `url` (DOI, link, arXiv ID) and/or a `file_path`. On this "
         "server, `file_path` is the **name of a file you upload below**.  \n"
         "3. Run. The `url` is always tried first; an uploaded file is the fallback.  \n"
@@ -727,14 +729,14 @@ def tab_batch():
         if len(rows) > CFG.max_batch_rows:
             extra = rows[CFG.max_batch_rows:]
             rows = rows[:CFG.max_batch_rows]
-            st.warning(f"This CSV has {len(rows) + len(extra)} rows. Batches hold up to "
-                       f"{CFG.max_batch_rows}, so only the first {CFG.max_batch_rows} will "
-                       "be screened in this run. Download the rest to run them next.")
+            st.warning(f"This CSV has {len(rows) + len(extra)} rows. Each run holds up to "
+                       f"{CFG.max_batch_rows} papers, so only the first {CFG.max_batch_rows} "
+                       "will be screened in this run. Download the rest to run them next.")
             st.download_button(f"Download the remaining {len(extra)} rows as a CSV",
                                wb.rows_csv(extra), file_name="batch_remaining.csv",
                                mime="text/csv")
         elif rows:
-            st.caption(f"This batch has **{len(rows)}** paper(s). Batches hold up to "
+            st.caption(f"This batch has **{len(rows)}** paper(s). Each run holds up to "
                        f"{CFG.max_batch_rows}.")
 
     files = st.file_uploader("Optional: PDFs / .pptx referenced in the file_path column",
@@ -774,15 +776,13 @@ def tab_batch():
                                  key="batch_abstract")
 
     pcfg, gate, err = provider_setup()
-    left = demo_left()
+    left = demo_runs_left()
     if left is not None and rows:
-        if left < len(rows):
-            st.warning(f"This batch has {len(rows)} papers but you have {left} demo "
-                       f"paper(s) left today, so only the first {left} will be screened. "
-                       "Use your own API key for the rest, or come back tomorrow.")
+        if left == 0:
+            st.warning(f"You've used today's {CFG.hosted_daily_runs} demo runs. Use your "
+                       "own API key to run this batch, or come back tomorrow.")
         else:
-            st.caption(f"This batch will use {len(rows)} of your {left} demo papers "
-                       "left today.")
+            st.caption(f"Running this batch uses 1 of your {left} demo run(s) left today.")
 
     if st.button("Run batch", type="primary", disabled=not rows):
         if err:
@@ -864,14 +864,14 @@ not a replacement for them.
   confidential.
 - Your own API key is held in memory for this session only and is never written to disk.
 
-**Limits here:** {CFG.max_batch_rows} papers per batch · {CFG.max_upload_mb} MB per file ·
+**Limits here:** {CFG.max_batch_rows} papers per run · {CFG.max_upload_mb} MB per file ·
 {CFG.max_workspace_mb} MB per workspace.
 
-**Demo key:** {CFG.hosted_daily_per_visitor} papers per visitor per day. Each paper
-screened uses one, and so does compiling criteria from text; loading the example profile,
-finding PDFs and viewing results use none. The allowance is counted per workspace *and*
-per network connection, so colleagues on the same office connection share it. It resets
-at 00:00 UTC. With your own API key there's no daily limit here.
+**Demo key:** {CFG.hosted_daily_runs} runs per visitor per day. A run is one batch (up to
+{CFG.max_batch_rows} papers) or one single-paper analysis; compiling criteria, loading the
+example profile, finding PDFs and viewing results don't use one. Runs are counted per
+workspace *and* per network connection, so colleagues on the same office connection share
+them. They reset at 00:00 UTC. With your own API key there's no daily limit here.
 
 *This application was developed with AI assistance (Claude Sonnet 5). It is experimental
 software intended for initial triage only; recommendations should be verified by a human

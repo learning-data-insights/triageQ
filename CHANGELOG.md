@@ -28,10 +28,12 @@ chat history. Dates reflect when each round of work took place.
 - **Web: Analyze can no longer screen a stale paper.** A fetched PDF is tied to the DOI/link
   or upload it came from; changing either clears it. Analyze also looks the paper up itself,
   so clicking **Find PDF** first is optional
-- **Web: demo-key limit raised to 50 papers per visitor per day (300 for everyone)** and shown wherever it
-  applies — sidebar, Batch tab, next to Analyze and Compile, and About. One paper screened
-  (or one criteria compile) uses one
-- **Web: batches over the 10-paper limit run the first 10** instead of being refused, with a
+- **Web: demo key is now counted in runs** — 5 runs per visitor per day, where a run is
+  one batch (up to 10 papers) or one single-paper analysis. Shown in the sidebar, the
+  Batch tab, next to Analyze, and on About. A run is only used once a paper actually goes
+  to the model; compiling criteria uses none. A hidden server-wide total (300 model calls
+  a day) remains the cost backstop
+- **Web: CSVs over the 10-paper-per-run limit run the first 10** instead of being refused, with a
   **Download the remaining rows** button for the next run
 - **Web: blank batch Paper IDs continue numbering** (`PAPER_11`… after an earlier
   `PAPER_1`–`PAPER_10`) so later batches add to a workspace's results instead of replacing
