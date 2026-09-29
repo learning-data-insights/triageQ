@@ -37,7 +37,7 @@ import pdf_resolver as pr
 import screening
 import web_backend as wb
 
-APP_VERSION = "1.2.1-web"
+APP_VERSION = "1.4.0"
 HERE = Path(__file__).parent
 EXAMPLES_DIR = HERE / "criteria-profiles"
 ASSETS = HERE / "assets"
@@ -83,9 +83,10 @@ def client_ip() -> str:
     socket address."""
     try:
         fwd = st.context.headers.get("X-Forwarded-For", "")
-        if fwd:
+        if isinstance(fwd, str) and fwd.strip():
             return fwd.split(",")[0].strip()
-        return getattr(st.context, "ip_address", None) or "unknown"
+        ip = getattr(st.context, "ip_address", None)
+        return ip if isinstance(ip, str) and ip else "unknown"
     except Exception:
         return "unknown"
 
@@ -145,7 +146,9 @@ def _sidebar_provider():
         left = QUOTA.remaining(WS.id, client_ip())
         st.sidebar.caption(
             f"Model: **{CFG.hosted_models[prov]}**  \n"
-            f"Demo calls left today: **{left}** of {CFG.hosted_daily_per_visitor}")
+            f"Demo papers left today: **{left} of {CFG.hosted_daily_per_visitor}**  \n"
+            "Each paper screened (or criteria compile) uses one. The allowance is shared "
+            "with anyone on the same network connection and resets at 00:00 UTC.")
         return
 
     provs = ["anthropic", "openai"] + (["openai_compatible"] if CFG.allow_custom_endpoint else [])
@@ -194,6 +197,14 @@ def provider_setup() -> tuple[mp.ProviderConfig | None, object, str]:
     return mp.ProviderConfig(provider=prov, api_key=key, model=model, base_url=base), None, ""
 
 
+
+def demo_left() -> int | None:
+    """Demo papers this visitor has left today, or None when not on the demo key.
+    One paper screened, or one criteria compile, uses one."""
+    if ss.get("key_source") == KEY_DEMO and CFG.hosted_keys:
+        return QUOTA.remaining(WS.id, client_ip())
+    return None
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Workspace controls (sidebar)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -211,24 +222,24 @@ def _sidebar_workspace():
     st.sidebar.download_button(
         "Download all results (.zip)", WS.export_zip(),
         file_name=f"triageq-results-{datetime.date.today()}.zip",
-        mime="application/zip", use_container_width=True)
+        mime="application/zip", width="stretch")
 
     if not ss.get("confirm_clear"):
-        if st.sidebar.button("Clear my session", use_container_width=True):
+        if st.sidebar.button("Clear my session", width="stretch"):
             ss["confirm_clear"] = True
             st.rerun()
     else:
         st.sidebar.warning("Delete every profile, upload and result in this workspace? "
                            "This can't be undone.")
         c1, c2 = st.sidebar.columns(2)
-        if c1.button("Delete", type="primary", use_container_width=True):
+        if c1.button("Delete", type="primary", width="stretch"):
             JOBS.forget(WS.id)
             WS.delete()
             _reset_session_state()
             st.query_params.clear()
             flash("success", "Session cleared. This is a fresh, empty workspace.")
             st.rerun()
-        if c2.button("Cancel", use_container_width=True):
+        if c2.button("Cancel", width="stretch"):
             ss["confirm_clear"] = False
             st.rerun()
 
@@ -468,7 +479,11 @@ def tab_criteria():
         st.text_area("Criteria text", key="criteria_text", height=180,
                      label_visibility="collapsed",
                      placeholder="Include studies that… Exclude studies that…")
-        if st.button("Compile criteria", type="primary"):
+        compile_clicked = st.button("Compile criteria", type="primary")
+        left = demo_left()
+        if left is not None:
+            st.caption(f"Uses 1 of your {left} demo paper(s) left today.")
+        if compile_clicked:
             raw = (ss.get("criteria_text") or "").strip()
             pcfg, gate, err = provider_setup()
             if not raw:
@@ -514,103 +529,137 @@ def _need_profile() -> dict | None:
     return p
 
 
+def _fetch_single(src: str) -> dict | None:
+    """Look a paper up by DOI or link (what Find PDF does). The result remembers
+    which input it came from, so it can never be screened for a different one."""
+    trail: list[str] = []
+    res = pr.resolve_pdf(src, CFG.resolver_config(), log=trail.append)
+    single = None
+    if res.ok:
+        single = dict(payload=res.pdf_bytes, basis="full_text", kind="pdf",
+                      pdf_source=res.resolved_via, pdf_url=res.pdf_url, url=src,
+                      label=f"{res.resolved_via} — {len(res.pdf_bytes)//1024} KB")
+    elif ss.get("abstract_fallback"):
+        meta = pr.fetch_metadata_only(src, CFG.resolver_config(), log=trail.append)
+        if meta.get("abstract"):
+            single = dict(payload=pr.format_metadata_as_text(meta), basis="abstract_only",
+                          kind="pdf", pdf_source="abstract only", pdf_url="", url=src,
+                          label="Abstract only — no full text")
+    if single:
+        single["src"] = ("link", src)
+    ss["single"] = single
+    ss["single_trail"] = (("link", src), trail)
+    if not single:
+        st.error(f"No open-access PDF found ({res.error}). Upload the file instead.")
+    return single
+
+
 def tab_single():
     profile = _need_profile()
     if not profile:
         return
     st.caption(f"Screening against **{profile['profile_name']}** v{profile['profile_version']}")
 
+    # An auto-assigned ID is shown back in the field, like the desktop app does. A
+    # widget can't be changed during the run that drew it, so it's applied here.
+    if "single_pid_next" in ss:
+        ss["single_pid"] = ss.pop("single_pid_next")
     st.text_input("Paper ID", key="single_pid",
-                  help="Your identifier for this paper; results are saved under it.")
+                  placeholder="Optional — auto-assigned if left blank",
+                  help="Your identifier for this paper; its result is saved under it. "
+                       "Leave blank and one is assigned (PAPER_<date and time>). "
+                       "Re-using an ID replaces that paper's earlier result.")
     how = st.radio("Source", ["Find by DOI or link", "Upload a file"], horizontal=True)
     st.checkbox("If no PDF can be found, screen from the title and abstract instead",
                 key="abstract_fallback")
 
+    # What the inputs currently point at. A fetched paper counts only while it
+    # still matches — otherwise a changed DOI would screen the previous paper.
+    want = None
     if how == "Find by DOI or link":
         c1, c2 = st.columns([4, 1])
-        src = c1.text_input("DOI, publisher link, arXiv ID, or PDF URL",
-                            placeholder="10.7717/peerj.4375", label_visibility="collapsed")
-        if c2.button("Find PDF", use_container_width=True) and src.strip():
+        src = c1.text_input("DOI, publisher link, arXiv ID, or PDF URL", key="single_src",
+                            placeholder="10.1371/journal.pone.0115069",
+                            label_visibility="collapsed").strip()
+        want = ("link", src) if src else None
+        if c2.button("Find PDF", width="stretch", disabled=not src):
             with st.spinner("Looking for an open-access copy…"):
-                trail: list[str] = []
-                res = pr.resolve_pdf(src.strip(), CFG.resolver_config(), log=trail.append)
-                single = None
-                if res.ok:
-                    single = dict(payload=res.pdf_bytes, basis="full_text", kind="pdf",
-                                  pdf_source=res.resolved_via, pdf_url=res.pdf_url,
-                                  url=src.strip(),
-                                  label=f"{res.resolved_via} — {len(res.pdf_bytes)//1024} KB")
-                elif ss.get("abstract_fallback"):
-                    meta = pr.fetch_metadata_only(src.strip(), CFG.resolver_config(),
-                                                  log=trail.append)
-                    if meta.get("abstract"):
-                        single = dict(payload=pr.format_metadata_as_text(meta),
-                                      basis="abstract_only", kind="pdf",
-                                      pdf_source="abstract only", pdf_url="",
-                                      url=src.strip(), label="Abstract only — no full text")
-                ss["single"] = single
-                ss["single_trail"] = trail
-                if not single:
-                    st.error(f"No open-access PDF found ({res.error}). Upload the file instead.")
+                _fetch_single(src)
     else:
         up = st.file_uploader("PDF or PowerPoint", type=["pdf", "pptx"], key="single_upload")
-        if up is not None and ss.get("single_upload_seen") != up.file_id:
-            try:
-                path = WS.save_upload(up.name, up.getvalue())
-                loaded = lib.load_for_screening(str(path), CFG.library_config())
-                if loaded["error"]:
-                    raise wb.WorkspaceError(loaded["error"])
-                ss["single"] = dict(payload=loaded["payload"], basis=loaded["basis"],
-                                    kind=loaded.get("source_kind", "pdf"),
-                                    pdf_source="upload", pdf_url="", url="",
-                                    file_path=path.name, label=path.name)
-                ss["single_upload_seen"] = up.file_id
-            except wb.WorkspaceError as exc:
-                st.error(str(exc))
+        if up is not None:
+            want = ("upload", up.file_id)
+            if (ss.get("single") or {}).get("src") != want:
+                ss["single"] = None
+                try:
+                    path = WS.save_upload(up.name, up.getvalue())
+                    loaded = lib.load_for_screening(str(path), CFG.library_config())
+                    if loaded["error"]:
+                        raise wb.WorkspaceError(loaded["error"])
+                    ss["single"] = dict(payload=loaded["payload"], basis=loaded["basis"],
+                                        kind=loaded.get("source_kind", "pdf"),
+                                        pdf_source="upload", pdf_url="", url="",
+                                        file_path=path.name, label=path.name, src=want)
+                except wb.WorkspaceError as exc:
+                    st.error(str(exc))
 
     single = ss.get("single")
+    if single and single.get("src") != want:
+        single = None
     if single:
         st.success(f"Ready: {single['label']}")
-    if ss.get("single_trail"):
+    trail = ss.get("single_trail")
+    if trail and trail[0] == want and trail[1]:
         with st.expander("Retrieval trail"):
-            st.code("\n".join(ss["single_trail"]), language=None)
+            st.code("\n".join(trail[1]), language=None)
 
-    if st.button("Analyze paper", type="primary", disabled=not single):
-        pid = (ss.get("single_pid") or "").strip()
+    left = demo_left()
+    clicked = st.button("Analyze paper", type="primary", disabled=want is None)
+    if left is not None:
+        st.caption(f"Uses 1 of your {left} demo paper(s) left today.")
+    if clicked:
         pcfg, gate, err = provider_setup()
-        if not pid:
-            st.error("Enter a Paper ID.")
-        elif err:
+        if err:
             st.error(err)
-        else:
-            with JOBS.slot(timeout=45) as ok:
-                if not ok:
-                    st.error("The server is busy with other screenings. Try again in a minute.")
-                else:
-                    reason = gate() if gate else None
-                    if reason:
-                        st.error(reason)
-                    else:
-                        with st.spinner("Screening — usually 20–90 seconds…"):
-                            try:
-                                result = screening.analyze_paper(
-                                    single["payload"], profile, pcfg,
-                                    screening_basis=single["basis"])
-                                entry = screening.build_repo_entry(
-                                    profile, pid, result, basis=single["basis"],
-                                    url=single["url"], file_path=single.get("file_path", ""),
-                                    pdf_source=single["pdf_source"],
-                                    pdf_url=single["pdf_url"], source_kind=single["kind"])
-                                WS.repo.save(entry)
-                                ss["single_result"] = (pid, result)
-                            except Exception as exc:
-                                st.error(f"Analysis failed: {exc}")
+            return
+        if single is None and want and want[0] == "link":
+            with st.spinner("Looking for an open-access copy…"):
+                single = _fetch_single(want[1])
+        if single is None:
+            return
+        # Same rule as the desktop app (1.3.0) and as batch rows: no ID, no problem.
+        pid = ((ss.get("single_pid") or "").strip()
+               or "PAPER_" + datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
+        with JOBS.slot(timeout=45) as ok:
+            if not ok:
+                st.error("The server is busy with other screenings. Try again in a minute.")
+                return
+            reason = gate() if gate else None
+            if reason:
+                st.error(reason)
+                return
+            with st.spinner("Screening — usually 20–90 seconds…"):
+                try:
+                    result = screening.analyze_paper(
+                        single["payload"], profile, pcfg, screening_basis=single["basis"])
+                    entry = screening.build_repo_entry(
+                        profile, pid, result, basis=single["basis"],
+                        url=single["url"], file_path=single.get("file_path", ""),
+                        pdf_source=single["pdf_source"],
+                        pdf_url=single["pdf_url"], source_kind=single["kind"])
+                    WS.repo.save(entry)
+                except Exception as exc:
+                    st.error(f"Analysis failed: {exc}")
+                    return
+        ss["single_result"] = (pid, result)
+        if pid != (ss.get("single_pid") or "").strip():
+            ss["single_pid_next"] = pid
+        st.rerun()
 
     if ss.get("single_result"):
         st.divider()
         pid, result = ss["single_result"]
         render_result(result, profile, pid)
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Tab: Batch
@@ -678,7 +727,8 @@ def tab_batch():
                      f"{CFG.max_batch_rows}. Split it into smaller batches.")
             rows = []
         elif rows:
-            st.caption(f"{len(rows)} paper(s) loaded.")
+            st.caption(f"This batch has **{len(rows)}** paper(s). Batches hold up to "
+                       f"{CFG.max_batch_rows}.")
 
     files = st.file_uploader("Optional: PDFs / .pptx referenced in the file_path column",
                              type=["pdf", "pptx"], accept_multiple_files=True,
@@ -717,11 +767,15 @@ def tab_batch():
                                  key="batch_abstract")
 
     pcfg, gate, err = provider_setup()
-    if gate and rows:
-        left = QUOTA.remaining(WS.id, client_ip())
+    left = demo_left()
+    if left is not None and rows:
         if left < len(rows):
-            st.warning(f"You have {left} demo-key call(s) left today, so only the first "
-                       f"{left} paper(s) will be screened. Use your own key for the rest.")
+            st.warning(f"This batch has {len(rows)} papers but you have {left} demo "
+                       f"paper(s) left today, so only the first {left} will be screened. "
+                       "Use your own API key for the rest, or come back tomorrow.")
+        else:
+            st.caption(f"This batch will use {len(rows)} of your {left} demo papers "
+                       "left today.")
 
     if st.button("Run batch", type="primary", disabled=not rows):
         if err:
@@ -759,20 +813,20 @@ def tab_results():
     cols = ["paper_id", "recommendation", "confidence", "title", "publication_year",
             "screening_basis", "profile_id", "profile_version", "analyzed_at"]
     st.dataframe([{c: r.get(c, "") for c in cols} for r in repo],
-                 use_container_width=True, hide_index=True)
+                 width="stretch", hide_index=True)
 
     d = st.columns(3)
     d[0].download_button("All results (CSV)", WS.repo.csv_path.read_bytes(),
                          file_name="paper_repository.csv", mime="text/csv",
-                         use_container_width=True)
+                         width="stretch")
     d[1].download_button("Full detail (JSON)", WS.repo.json_path.read_bytes(),
                          file_name="paper_repository.json", mime="application/json",
-                         use_container_width=True)
+                         width="stretch")
     active = WS.active_profile()
     if active and WS.repo.profile_csv_path(active["profile_id"]).exists():
         p = WS.repo.profile_csv_path(active["profile_id"])
         d[2].download_button(f"Per-criterion CSV ({active['profile_id']})", p.read_bytes(),
-                             file_name=p.name, mime="text/csv", use_container_width=True)
+                             file_name=p.name, mime="text/csv", width="stretch")
 
     st.divider()
     pids = [r["paper_id"] for r in repo]
@@ -806,9 +860,15 @@ not a replacement for them.
 **Limits here:** {CFG.max_batch_rows} papers per batch · {CFG.max_upload_mb} MB per file ·
 {CFG.max_workspace_mb} MB per workspace.
 
+**Demo key:** {CFG.hosted_daily_per_visitor} papers per visitor per day. Each paper
+screened uses one, and so does compiling criteria from text; loading the example profile,
+finding PDFs and viewing results use none. The allowance is counted per workspace *and*
+per network connection, so colleagues on the same office connection share it. It resets
+at 00:00 UTC. With your own API key there's no daily limit here.
+
 *This application was developed with AI assistance (Claude Sonnet 5). It is experimental
 software intended for initial triage only; recommendations should be verified by a human
-reviewer. Licensed under Apache 2.0.* AI-assisted application built by Learning Data Insights.
+reviewer. Licensed under CC BY-SA 4.0.* AI-assisted application built by Learning Data Insights.
 """)
 
 

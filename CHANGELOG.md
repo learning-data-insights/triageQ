@@ -6,8 +6,8 @@ chat history. Dates reflect when each round of work took place.
 
 ---
 
-## 1.3.0 — Hosted web build
-**2026-09-25**
+## 1.4.0 — Hosted web build
+**2026-09-25 – 2026-09-29**
 
 - **New browser front end (`web_app.py`, Streamlit)** for running triageQ as a public
   reference deployment. Same screening engine, same repository format as the desktop app
@@ -23,6 +23,41 @@ chat history. Dates reflect when each round of work took place.
   app's behavior is unchanged
 - **Deployment:** `Dockerfile`, `docker-compose.yml` with Caddy for automatic HTTPS, and
   `DEPLOY.md`, a step-by-step AWS Lightsail guide
+- **Web: Paper ID optional on Screen one paper**, matching the desktop change in 1.3.0 — a
+  blank field is auto-assigned `PAPER_<timestamp>` and written back into the field
+- **Web: Analyze can no longer screen a stale paper.** A fetched PDF is tied to the DOI/link
+  or upload it came from; changing either clears it. Analyze also looks the paper up itself,
+  so clicking **Find PDF** first is optional
+- **Web: demo-key limit raised to 50 papers per visitor per day (300 for everyone)** and shown wherever it
+  applies — sidebar, Batch tab, next to Analyze and Compile, and About. One paper screened
+  (or one criteria compile) uses one
+- **arXiv DOIs** (`10.48550/arXiv.<id>`) now take the direct arXiv route (desktop too)
+- **License:** `LICENSE` replaced with the CC BY-SA 4.0 legal code, so it agrees with the
+  README and both About pages
+
+---
+
+## 1.3.0 — Paper ID no longer required for single-paper analysis
+**2026-09-28**
+
+Reported inconsistency: batch analysis auto-assigns a paper ID to any row that doesn't
+have one (`PAPER_<row number>`), but the Single Paper tab blocked analysis outright with
+a "Please enter a Paper ID" warning if the field was left blank.
+
+- **Single Paper now matches batch's behavior.** An empty Paper ID field no longer blocks
+  analysis — one is auto-assigned (`PAPER_<timestamp>`, e.g. `PAPER_20260928174914`) and
+  written back into the field so it's visible before and after the run, the same way a
+  batch row's assigned ID is visible in the batch log. An explicitly entered ID is still
+  used exactly as before; nothing changes for anyone already typing one in
+  - A timestamp rather than batch's row-position scheme, since a single ad-hoc analysis has
+    no "row" to count from — down-to-the-second precision makes collisions effectively a
+    non-issue for one-at-a-time use
+- Updated the field's hint text ("Optional — auto-assigned if left blank...") and the
+  README's single-paper walkthrough to match
+- Tested directly: confirmed a blank field no longer triggers the warning dialog, the
+  auto-generated ID is what actually gets passed to the analysis worker, the field reflects
+  it back to the user, and an explicitly-entered ID is still respected unchanged — then
+  re-ran the full existing test suite to confirm nothing else broke
 
 ---
 

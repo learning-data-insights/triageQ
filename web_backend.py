@@ -102,8 +102,8 @@ class Config:
             allow_custom_endpoint=_env_bool("TRIAGEQ_ALLOW_CUSTOM_ENDPOINT", True),
             hosted_keys=hosted_keys,
             hosted_models=hosted_models,
-            hosted_daily_total=_env_int("TRIAGEQ_HOSTED_DAILY_TOTAL", 100),
-            hosted_daily_per_visitor=_env_int("TRIAGEQ_HOSTED_DAILY_PER_VISITOR", 5),
+            hosted_daily_total=_env_int("TRIAGEQ_HOSTED_DAILY_TOTAL", 300),
+            hosted_daily_per_visitor=_env_int("TRIAGEQ_HOSTED_DAILY_PER_VISITOR", 50),
         )
 
     def resolver_config(self) -> pr.ResolverConfig:
@@ -387,7 +387,9 @@ class Quota:
             if (u["workspace"].get(ws_id, 0) >= self.cfg.hosted_daily_per_visitor
                     or u["ip"].get(ip, 0) >= self.cfg.hosted_daily_per_visitor):
                 return (f"You've used today's {self.cfg.hosted_daily_per_visitor} demo-key "
-                        "calls. Use your own API key to keep going, or come back tomorrow.")
+                        "papers (the allowance is shared by everyone on your network "
+                        "connection). Use your own API key to keep going, or come back "
+                        "tomorrow (resets at 00:00 UTC).")
             u["total"] += 1
             u["workspace"][ws_id] = u["workspace"].get(ws_id, 0) + 1
             u["ip"][ip] = u["ip"].get(ip, 0) + 1

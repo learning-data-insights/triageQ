@@ -492,6 +492,11 @@ def arxiv_pdf_urls(source: str) -> list[str]:
     m = re.search(r"\barXiv[:\s]+([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", source or "", re.IGNORECASE)
     if m:
         return [f"https://arxiv.org/pdf/{m.group(1)}"]
+    # arXiv's own DataCite DOIs, e.g. 10.48550/arXiv.2511.11772 — not in Unpaywall
+    # (Crossref-only), so without this they only resolve via the slower fallbacks.
+    m = re.search(r"10\.48550/arXiv\.([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", source or "", re.IGNORECASE)
+    if m:
+        return [f"https://arxiv.org/pdf/{m.group(1)}"]
     return []
 
 
