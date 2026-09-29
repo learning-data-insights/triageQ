@@ -428,6 +428,47 @@ def read_batch_csv(data: bytes) -> list[dict]:
     return list(csv.DictReader(io.StringIO(text)))
 
 
+def rows_csv(rows: list[dict]) -> bytes:
+    """Batch rows back out as a CSV, columns in their original order."""
+    cols: list[str] = []
+    for r in rows:
+        cols += [k for k in r if k is not None and k not in cols]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        w.writerow({k: v for k, v in r.items() if k is not None})
+    return buf.getvalue().encode("utf-8")
+
+
+_AUTO_ID_RE = re.compile(r"^PAPER_(\d+)$")
+
+
+def assign_paper_ids(rows: list[dict], existing_ids) -> list[dict]:
+    """Give every row without a paper_id the next unused PAPER_<n>.
+
+    The desktop numbers blank rows by position (PAPER_1, PAPER_2, ...), which on
+    the web meant a second batch in the same workspace replaced the first one's
+    results. Numbering here continues from the highest PAPER_<n> already in the
+    workspace or in this CSV, so results accumulate. Typed IDs are left alone —
+    re-using one still replaces that paper's earlier result, deliberately.
+    """
+    rows = [dict(r) for r in rows]
+    taken = {str(i).strip() for i in existing_ids if i}
+    taken |= {(r.get("paper_id") or "").strip() for r in rows} - {""}
+    n = max((int(m.group(1)) for t in taken if (m := _AUTO_ID_RE.match(t))), default=0)
+    for r in rows:
+        pid = (r.get("paper_id") or "").strip()
+        if not pid:
+            n += 1
+            while f"PAPER_{n}" in taken:
+                n += 1
+            pid = f"PAPER_{n}"
+            taken.add(pid)
+        r["paper_id"] = pid
+    return rows
+
+
 def batch_template_csv() -> bytes:
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=screening.BATCH_CSV_COLUMNS)
@@ -556,7 +597,15 @@ def run_batch(job: Job, ws: Workspace, rows: list[dict], profile: dict,
     if allow_abstract:
         job.write("Abstract-only fallback: ON\n", "info")
 
-    targets = lib.targets_from_rows(rows, {r.get("paper_id"): r for r in ws.repo.load()})
+    repo_index = {r.get("paper_id"): r for r in ws.repo.load()}
+    blank = sum(1 for r in rows if not (r.get("paper_id") or "").strip())
+    rows = assign_paper_ids(rows, repo_index)
+    if blank:
+        auto = [r["paper_id"] for r in rows if _AUTO_ID_RE.match(r["paper_id"])][-blank:]
+        job.write(f"{blank} row(s) had no paper_id and were numbered "
+                  f"{auto[0]}{' – ' + auto[-1] if blank > 1 else ''}.\n", "info")
+
+    targets = lib.targets_from_rows(rows, repo_index)
     target_by_pid = {t.paper_id: t for t in targets}
     n_abstract = n_mismatch = 0
 
@@ -567,7 +616,7 @@ def run_batch(job: Job, ws: Workspace, rows: list[dict], profile: dict,
             break
         ws.open()   # a long batch keeps its workspace alive
 
-        pid = (row.get("paper_id") or f"PAPER_{i+1}").strip()
+        pid = row["paper_id"]
         url = (row.get("url") or "").strip()
         fp_name = (row.get("file_path") or "").strip()
         target = target_by_pid.get(pid)

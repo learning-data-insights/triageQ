@@ -31,6 +31,12 @@ chat history. Dates reflect when each round of work took place.
 - **Web: demo-key limit raised to 50 papers per visitor per day (300 for everyone)** and shown wherever it
   applies — sidebar, Batch tab, next to Analyze and Compile, and About. One paper screened
   (or one criteria compile) uses one
+- **Web: batches over the 10-paper limit run the first 10** instead of being refused, with a
+  **Download the remaining rows** button for the next run
+- **Web: blank batch Paper IDs continue numbering** (`PAPER_11`… after an earlier
+  `PAPER_1`–`PAPER_10`) so later batches add to a workspace's results instead of replacing
+  them. Typed IDs still replace their earlier result, as before. The desktop app still
+  numbers blank rows from `PAPER_1` in each batch
 - **arXiv DOIs** (`10.48550/arXiv.<id>`) now take the direct arXiv route (desktop too)
 - **License:** `LICENSE` replaced with the CC BY-SA 4.0 legal code, so it agrees with the
   README and both About pages

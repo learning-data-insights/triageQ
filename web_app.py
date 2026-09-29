@@ -713,7 +713,9 @@ def tab_batch():
         f"**{CFG.max_batch_rows}** rows).  \n"
         "2. Each row needs a `url` (DOI, link, arXiv ID) and/or a `file_path`. On this "
         "server, `file_path` is the **name of a file you upload below**.  \n"
-        "3. Run. The `url` is always tried first; an uploaded file is the fallback.")
+        "3. Run. The `url` is always tried first; an uploaded file is the fallback.  \n"
+        "Leave `paper_id` blank and rows are numbered for you (PAPER_1, PAPER_2, …), "
+        "continuing after any earlier batches, so results add up in the **Results** tab.")
     st.download_button("Download CSV template", wb.batch_template_csv(),
                        file_name="batch_template.csv", mime="text/csv")
 
@@ -723,9 +725,14 @@ def tab_batch():
         rows = [r for r in wb.read_batch_csv(up.getvalue())
                 if any((v or "").strip() for v in r.values())]
         if len(rows) > CFG.max_batch_rows:
-            st.error(f"This CSV has {len(rows)} rows; the limit here is "
-                     f"{CFG.max_batch_rows}. Split it into smaller batches.")
-            rows = []
+            extra = rows[CFG.max_batch_rows:]
+            rows = rows[:CFG.max_batch_rows]
+            st.warning(f"This CSV has {len(rows) + len(extra)} rows. Batches hold up to "
+                       f"{CFG.max_batch_rows}, so only the first {CFG.max_batch_rows} will "
+                       "be screened in this run. Download the rest to run them next.")
+            st.download_button(f"Download the remaining {len(extra)} rows as a CSV",
+                               wb.rows_csv(extra), file_name="batch_remaining.csv",
+                               mime="text/csv")
         elif rows:
             st.caption(f"This batch has **{len(rows)}** paper(s). Batches hold up to "
                        f"{CFG.max_batch_rows}.")
