@@ -89,6 +89,11 @@ environment variables — see `.env.example`.
 
 **[DEPLOY.md](DEPLOY.md)** walks through hosting it on AWS Lightsail step by step.
 
+One difference from the desktop app: in a web batch, rows with no `paper_id` are numbered
+`PAPER_1`, `PAPER_2`, … continuing after the highest `PAPER_<n>` already in the visitor's
+workspace, rather than the desktop's `PAPER_<timestamp>_<row>`. Both keep a second run from
+overwriting the first; the web scheme stays short since results live in one workspace.
+
 ---
 
 ## Setup
@@ -657,8 +662,10 @@ the feature degrades rather than presenting a zone that silently does nothing.
 1. Go to the **Single Paper** tab
 2. Confirm the criteria profile shown at the top is the one you want
 3. Optionally enter a **Paper ID** — the unique identifier in the repository. Leave it
-   blank and one is auto-assigned (`PAPER_<timestamp>`), the same way an unset row in a
-   batch CSV gets `PAPER_<row number>` rather than blocking the run
+   blank and one is auto-assigned (`PAPER_<timestamp>`) — the same naming scheme a batch
+   row with no `paper_id` column gets (`PAPER_<timestamp>_<row number>`, all rows in one
+   run sharing that run's timestamp), just without the row suffix since there's only one
+   paper. Neither one blocks the run
 4. Either:
    - Paste a **DOI, publisher link, arXiv ID, or direct PDF URL** and click **Find PDF**
    - Or click **Upload PDF** to load a local file
@@ -680,7 +687,7 @@ later overwrites that record rather than creating a duplicate.
 
 | Column | Required | Notes |
 |--------|----------|-------|
-| `paper_id` | ✓ | Your internal identifier |
+| `paper_id` | optional | Your internal identifier. Left blank, a row gets `PAPER_<timestamp>_<row number>` — one timestamp per batch run, shared by every row in it, so re-running the same ID-less CSV later doesn't collide with (and silently overwrite) the earlier run's rows |
 | `url` | one of these | DOI, publisher link, arXiv ID, or direct PDF URL |
 | `file_path` | one of these | Local path to a specific file |
 | `title` | optional | Improves local file matching; trusted over fetched metadata |
@@ -692,6 +699,8 @@ later overwrites that record rather than creating a duplicate.
   `doi` are used only to help match local files
 - Columns can be in any order; extra columns are ignored
 - The `url` column no longer needs to be a direct PDF link
+- A folder scan's preview and the actual run always agree on an ID-less row's assigned ID —
+  both are computed from the same run timestamp, captured once when the CSV is selected
 
 4. Click **Select CSV**
 5. Optional: click **Scan Folder for Matches** if you have local copies for papers you
@@ -807,7 +816,7 @@ the abstract.
 
 | Field | Source |
 |-------|--------|
-| `paper_id` | Entered by user |
+| `paper_id` | Entered by user, or auto-assigned (`PAPER_<timestamp>[_<row number>]`) if left blank |
 | `title`, `authors`, `publication_year`, `journal_or_venue`, `doi`, `abstract` | Extracted from PDF |
 | `url` / `file_path` | From CSV or manual entry |
 | `recommendation` | INCLUDE / EXCLUDE / MANUAL_REVIEW |
