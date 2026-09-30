@@ -33,6 +33,9 @@ chat history. Dates reflect when each round of work took place.
   Batch tab, next to Analyze, and on About. A run is only used once a paper actually goes
   to the model; compiling criteria uses none. A hidden server-wide total (300 model calls
   a day) remains the cost backstop
+- **Web: Results show when each paper was screened** — a **Screened** column
+  (`Sep 30, 13:36 UTC`) next to the Paper ID, newest first, and the time in each result's
+  heading. Downloads keep the full `analyzed_at` value
 - **Web: CSVs over the 10-paper-per-run limit run the first 10** instead of being refused, with a
   **Download the remaining rows** button for the next run
 - **Web: blank batch Paper IDs continue numbering** (`PAPER_11`… after an earlier

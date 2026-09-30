@@ -410,10 +410,9 @@ class Quota:
                 if not state["run_counted"]:
                     used = max(u["runs_workspace"].get(ws_id, 0), u["runs_ip"].get(ip, 0))
                     if used >= self.cfg.hosted_daily_runs:
-                        return (f"You've used today's {self.cfg.hosted_daily_runs} demo runs "
-                                "(they're shared by everyone on your network connection). "
+                        return (f"You've used today's {self.cfg.hosted_daily_runs} demo runs. "
                                 "Use your own API key to keep going, or come back tomorrow "
-                                "(resets at 00:00 UTC).")
+                                "(resets at 00:00 UTC). See About for how runs are counted.")
                     u["runs_workspace"][ws_id] = u["runs_workspace"].get(ws_id, 0) + 1
                     u["runs_ip"][ip] = u["runs_ip"].get(ip, 0) + 1
                     state["run_counted"] = True

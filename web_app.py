@@ -148,8 +148,7 @@ def _sidebar_provider():
             f"Model: **{CFG.hosted_models[prov]}**  \n"
             f"Demo runs left today: **{left} of {CFG.hosted_daily_runs}**  \n"
             f"A run is one batch (up to {CFG.max_batch_rows} papers) or one single-paper "
-            "analysis. Runs are shared with anyone on the same network connection and "
-            "reset at 00:00 UTC.")
+            "analysis. Runs reset at 00:00 UTC.")
         return
 
     provs = ["anthropic", "openai"] + (["openai_compatible"] if CFG.allow_custom_endpoint else [])
@@ -256,10 +255,22 @@ REC_STYLE = {"INCLUDE": ("✅", "green"), "EXCLUDE": ("⛔", "red"),
 VERDICT_COLOR = {"YES": "green", "NO": "red", "UNCLEAR": "orange"}
 
 
-def render_result(result: dict, profile: dict | None, paper_id: str):
+def fmt_screened(iso: str) -> str:
+    """'2026-09-30T13:36:49' → 'Sep 30, 13:36 UTC'. Records are stamped with the
+    server's clock, which is UTC in the container."""
+    try:
+        return datetime.datetime.fromisoformat(iso).strftime("%b %d, %H:%M UTC")
+    except (TypeError, ValueError):
+        return iso or ""
+
+
+def render_result(result: dict, profile: dict | None, paper_id: str,
+                  screened_at: str = ""):
     rec = result.get("overall_recommendation", "?")
     icon, color = REC_STYLE.get(rec, ("", "gray"))
     st.markdown(f"### {icon} :{color}[{rec}] &nbsp; · &nbsp; {paper_id}")
+    if screened_at:
+        st.caption(f"Screened {fmt_screened(screened_at)}")
     meta = [f"**Confidence:** {result.get('confidence_level', '?')}"]
     if profile:
         meta.append(f"**Criteria:** {profile['profile_name']} v{profile['profile_version']}")
@@ -653,15 +664,15 @@ def tab_single():
                 except Exception as exc:
                     st.error(f"Analysis failed: {exc}")
                     return
-        ss["single_result"] = (pid, result)
+        ss["single_result"] = (pid, result, entry["analyzed_at"])
         if pid != (ss.get("single_pid") or "").strip():
             ss["single_pid_next"] = pid
         st.rerun()
 
     if ss.get("single_result"):
         st.divider()
-        pid, result = ss["single_result"]
-        render_result(result, profile, pid)
+        pid, result, screened_at = ss["single_result"]
+        render_result(result, profile, pid, screened_at)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Tab: Batch
@@ -817,10 +828,18 @@ def tab_results():
     m[2].metric("Exclude", counts["EXCLUDE"])
     m[3].metric("Manual review", counts["MANUAL_REVIEW"])
 
+    repo = sorted(repo, key=lambda r: r.get("analyzed_at") or "", reverse=True)
     cols = ["paper_id", "recommendation", "confidence", "title", "publication_year",
-            "screening_basis", "profile_id", "profile_version", "analyzed_at"]
-    st.dataframe([{c: r.get(c, "") for c in cols} for r in repo],
-                 width="stretch", hide_index=True)
+            "screening_basis", "profile_id", "profile_version"]
+    table = []
+    for r in repo:
+        row = {"paper_id": r.get("paper_id", ""),
+               "screened": fmt_screened(r.get("analyzed_at", ""))}
+        row.update({c: r.get(c, "") for c in cols[1:]})
+        table.append(row)
+    st.caption("Newest first.")
+    st.dataframe(table, width="stretch", hide_index=True,
+                 column_config={"paper_id": "Paper ID", "screened": "Screened"})
 
     d = st.columns(3)
     d[0].download_button("All results (CSV)", WS.repo.csv_path.read_bytes(),
@@ -836,11 +855,13 @@ def tab_results():
                              file_name=p.name, mime="text/csv", width="stretch")
 
     st.divider()
-    pids = [r["paper_id"] for r in repo]
-    pick = st.selectbox("View a paper", pids)
-    entry = next(r for r in repo if r["paper_id"] == pick)
+    by_pid = {r["paper_id"]: r for r in repo}
+    pick = st.selectbox(
+        "View a paper", list(by_pid),
+        format_func=lambda pid: f"{pid}  ·  {fmt_screened(by_pid[pid].get('analyzed_at', ''))}")
+    entry = by_pid[pick]
     prof = cp.load_profile(WS.root, entry.get("profile_id", ""))
-    render_result(entry.get("_full_result") or {}, prof, pick)
+    render_result(entry.get("_full_result") or {}, prof, pick, entry.get("analyzed_at", ""))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
