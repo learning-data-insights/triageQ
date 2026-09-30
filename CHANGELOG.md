@@ -6,6 +6,42 @@ chat history. Dates reflect when each round of work took place.
 
 ---
 
+## 1.3.1 — One naming scheme for both auto-assigned Paper IDs
+**2026-09-30**
+
+Follow-up to 1.3.0: batch's fallback ID (`PAPER_<row number>`) and single paper's new
+fallback ID (`PAPER_<timestamp>`) were two different schemes that happened to share a
+prefix. This unifies them into one family.
+
+- **Batch's fallback ID is now `PAPER_<run timestamp>_<row number>`** — e.g.
+  `PAPER_20260930133649_1`, `_2`, `_3`... for a three-row CSV with no `paper_id` column.
+  Same `PAPER_<timestamp>` family as single paper's `PAPER_<timestamp>`, with a row suffix
+  since one batch run covers multiple papers sharing a timestamp and single paper is always
+  exactly one
+- **The timestamp is captured once, when the CSV is selected, and reused by every pass
+  that needs it** — not computed fresh each time. Batch has two passes that both compute a
+  row's fallback ID: the folder-scan preview (shows what a file will match to before you
+  run anything) and the actual analysis run. Computing "now" independently in each would
+  have made the preview show a different ID than what actually gets saved a moment later —
+  so both now read one `self._batch_run_ts` set in `_select_batch_csv`, via a shared
+  `_batch_fallback_id()` helper both call
+- **Fixes a pre-existing edge case as a side effect, not the main goal:** re-running the
+  same ID-less CSV a second time previously generated identical `PAPER_1`, `PAPER_2`...
+  IDs and silently overwrote the first run's results. Each run now gets its own timestamp
+  prefix, so two runs of the same CSV land as distinct records instead
+- Corrected two other stale "paper_id is required" spots surfaced while working in this
+  area: the Batch Upload tab's own on-screen instructions text still said "Required column:
+  paper_id" (independent of and older than today's change — the code hadn't actually
+  required it for some time, just the instructions), and the CSV template table in the
+  README
+- Tested directly: confirmed the preview pass and the run pass compute identical IDs for
+  the same row within one CSV selection, confirmed two separate selections of the same CSV
+  get different timestamps, confirmed a row's own explicit `paper_id` is still respected
+  unchanged — then re-ran the full existing test suite, including the batch save-failure
+  handling test from 1.1.1 (which exercises this same code path), to confirm nothing broke
+
+---
+
 ## 1.3.0 — Paper ID no longer required for single-paper analysis
 **2026-09-28**
 

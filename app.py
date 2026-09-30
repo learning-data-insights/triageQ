@@ -1,5 +1,5 @@
 """
-triageQ  (v1.3.0)
+triageQ  (v1.3.1)
 
 An open, human-in-the-loop tool for sorting large volumes of content against
 custom criteria. triageQ ships with no built-in criteria of its own — every
@@ -124,7 +124,7 @@ except Exception:                                    # pragma: no cover
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 APP_TITLE = "triageQ"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 SETTINGS_FILE = Path.home() / ".triageq_settings.json"
 
 REPO_DIR = Path.home() / "triageq"
@@ -556,6 +556,11 @@ class PaperScreenerApp(tk.Tk):
         self._current_pdf_source = ""       # which resolver step produced it
         self._current_pdf_url = ""
         self._batch_csv_path = None
+        # Set once when a CSV is selected (_select_batch_csv) and reused by
+        # both the folder-scan preview and the actual run, so a row's
+        # auto-assigned fallback ID (no paper_id column) is identical in
+        # both passes rather than drifting if each computed its own "now".
+        self._batch_run_ts = None
 
         # paper_id -> {"path", "method", "score", "kind"} confirmed by the user
         self._library_map: dict = {}
@@ -965,11 +970,11 @@ class PaperScreenerApp(tk.Tk):
                  font=(FONT_FAMILY, 9), justify="left", anchor="w",
                  text=(
                      "Upload a CSV with one paper per row.\n"
-                     "Required column: paper_id\n"
                      "Source (at least one): url, file_path, or a matched local file\n"
                      "The url column accepts a DOI, publisher link, arXiv id, or direct PDF.\n"
-                     "Optional: title, doi — these let local files be matched by content\n"
-                     "when their filenames carry no paper ID."
+                     "Optional: paper_id (auto-assigned if left blank), title, doi — the\n"
+                     "latter two let local files be matched by content when their\n"
+                     "filenames carry no paper ID."
                  )).pack(anchor="w", pady=(0, 8))
         self._btn(info_inner, "Download CSV Template",
                   self._download_batch_template, "secondary",
@@ -1260,7 +1265,7 @@ class PaperScreenerApp(tk.Tk):
 
             csv_fp_by_pid = {}
             for i, row in enumerate(rows):
-                pid = (row.get("paper_id") or f"PAPER_{i+1}").strip()
+                pid = (row.get("paper_id") or self._batch_fallback_id(i)).strip()
                 fp_csv = (row.get("file_path") or "").strip()
                 if fp_csv:
                     fp_csv = fp_csv.replace("\\", os.sep).replace("/", os.sep)
@@ -3134,8 +3139,20 @@ class PaperScreenerApp(tk.Tk):
             title="Select Batch CSV", filetypes=[("CSV files", "*.csv")])
         if path:
             self._batch_csv_path = path
+            self._batch_run_ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
             self._batch_file_label.config(text=Path(path).name, fg=PALETTE["ink"])
             self._batch_run_btn.config(state="normal")
+
+    def _batch_fallback_id(self, row_index: int) -> str:
+        """The ID an ID-less row gets, in the same PAPER_<timestamp>[_<n>]
+        family as single-paper's auto-assigned ID. Both the folder-scan
+        preview and the actual run call this, so they always agree on what
+        a given row's ID will be — self._batch_run_ts is set once, when the
+        CSV is selected, specifically so neither pass computes its own
+        "now" and drifts from the other.
+        """
+        ts = self._batch_run_ts or datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        return f"PAPER_{ts}_{row_index + 1}"
 
     def _run_batch_analysis(self):
         if not self._batch_csv_path:
@@ -3212,7 +3229,7 @@ class PaperScreenerApp(tk.Tk):
                 self._log_batch(f"\n⏹ Batch stopped after {i} of {total} papers.\n", "info")
                 break
 
-            pid = (row.get("paper_id") or f"PAPER_{i+1}").strip()
+            pid = (row.get("paper_id") or self._batch_fallback_id(i)).strip()
             url = (row.get("url") or "").strip()
             fp = (row.get("file_path") or "").strip()
             if fp:
