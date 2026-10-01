@@ -37,7 +37,7 @@ import pdf_resolver as pr
 import screening
 import web_backend as wb
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.3.1"
 HERE = Path(__file__).parent
 EXAMPLES_DIR = HERE / "criteria-profiles"
 ASSETS = HERE / "assets"

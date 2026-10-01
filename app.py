@@ -1,5 +1,5 @@
 """
-triageQ  (v1.4.0)
+triageQ  (v1.3.1)
 
 An open, human-in-the-loop tool for sorting large volumes of content against
 custom criteria. triageQ ships with no built-in criteria of its own — every
@@ -125,7 +125,7 @@ except Exception:                                    # pragma: no cover
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 APP_TITLE = "triageQ"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.3.1"
 SETTINGS_FILE = Path.home() / ".triageq_settings.json"
 
 REPO_DIR = Path.home() / "triageq"
