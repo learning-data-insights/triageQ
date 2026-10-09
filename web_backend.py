@@ -449,7 +449,10 @@ def read_batch_csv(data: bytes) -> list[dict]:
             continue
     else:
         text = data.decode("utf-8", errors="replace")
-    return list(csv.DictReader(io.StringIO(text)))
+    # A row with more fields than the header puts the surplus under the key None
+    # (as a list); drop it so every value callers see is a string.
+    return [{k: v for k, v in row.items() if k is not None}
+            for row in csv.DictReader(io.StringIO(text))]
 
 
 def rows_csv(rows: list[dict]) -> bytes:

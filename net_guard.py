@@ -41,15 +41,19 @@ def _is_public(ip: str) -> bool:
 def check_url(url: str) -> None:
     """Raise BlockedURL unless url is http(s) and every address its host
     resolves to is publicly routable."""
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+        port = parts.port          # raises ValueError for a non-numeric or out-of-range port
+    except ValueError:
+        raise BlockedURL("link is not a well-formed URL")
     if parts.scheme not in ("http", "https"):
         raise BlockedURL(f"only http(s) links are allowed (got {parts.scheme or 'none'})")
     host = parts.hostname
     if not host:
         raise BlockedURL("link has no host")
     try:
-        infos = socket.getaddrinfo(host, parts.port or 443, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
+        infos = socket.getaddrinfo(host, port or 443, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError):   # UnicodeError: host isn't valid IDNA
         raise BlockedURL(f"could not resolve host {host}")
     for info in infos:
         ip = info[4][0]

@@ -6,6 +6,11 @@ fileWatcherType = "none"
 # in docker-compose.yml). Megabytes, per file.
 maxUploadSize = 25
 
+[runner]
+# The app never relies on "magic" (bare expressions auto-shown with st.write).
+# With it on, a stray bare expression can crash the page (1.3.2 Validate bug).
+magicEnabled = false
+
 [browser]
 gatherUsageStats = false
 

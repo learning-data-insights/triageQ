@@ -6,6 +6,39 @@ chat history. Dates reflect when each round of work took place.
 
 ---
 
+## 1.3.2 — Hosted web build: Validate crash and four smaller fixes
+**2026-10-09**
+
+Web build (`web_app.py`) only; the desktop app is unchanged apart from a stricter check in
+`validate_profile`.
+
+- **Fixed: clicking "Validate" in the profile editor crashed the whole page** with
+  `SyntaxError: '(' was never closed`. The result line was a bare two-line conditional
+  expression; Streamlit's "magic" wraps such expressions in `st.write`, which falls through
+  to `st.help`, which parses only the first source line. Rewritten as plain statements, and
+  magic is now turned off in `.streamlit/config.toml` so this class of error can't recur
+- **Fixed: a mistyped base URL for an OpenAI-compatible endpoint crashed every tab** on every
+  rerun. `net_guard.check_url` now reports a malformed URL (bad port, bad IPv6 literal, host
+  that isn't valid IDNA) as `BlockedURL`, and the sidebar shows it as a normal message
+- **Fixed: a batch CSV row with more fields than the header** (an unquoted comma in a title,
+  trailing commas) crashed the Batch tab. Surplus fields are now dropped when the CSV is read
+- **Fixed: a numeric `profile_id` / `profile_name` / `profile_version` in the editor** passed
+  validation and then crashed Save, or crashed the Criteria tab on every later visit.
+  `validate_profile` now requires these to be text strings
+- **Fixed: "Remove all uploaded files" saved them straight back** on the next rerun, because the
+  file picker still held them and the seen-list had been cleared. The seen-list is kept; a
+  caption explains how to re-upload
+- **Fixed: Results showed every record with the profile's *current* version** rather than the
+  version it was screened with
+- Result display no longer errors on non-string tag values or a malformed criterion block
+
+Known limitations (unchanged): editing a profile that has already screened papers bumps the
+version but keeps one file per profile id, so the earlier version's criteria can't be viewed
+afterwards; loading an example or importing a profile overwrites an existing profile with the
+same id without asking.
+
+---
+
 ## 1.3.1 — One naming scheme for auto-assigned Paper IDs; hosted web build
 **2026-09-30**
 

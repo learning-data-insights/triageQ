@@ -177,8 +177,11 @@ def validate_profile(profile: dict) -> tuple[bool, list[str]]:
         return False, ["Profile must be a JSON object."]
 
     for field in ("profile_id", "profile_name", "profile_version"):
-        if not str(profile.get(field) or "").strip():
+        val = profile.get(field)
+        if val is None or (isinstance(val, str) and not val.strip()):
             e.append(f"Missing required field: {field}")
+        elif not isinstance(val, str):
+            e.append(f"{field} must be a text string (in quotes), not {type(val).__name__}.")
 
     pid = str(profile.get("profile_id") or "")
     if pid and not re.match(r"^[A-Za-z0-9_.-]+$", pid):

@@ -37,7 +37,7 @@ import pdf_resolver as pr
 import screening
 import web_backend as wb
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 HERE = Path(__file__).parent
 EXAMPLES_DIR = HERE / "criteria-profiles"
 ASSETS = HERE / "assets"
@@ -194,7 +194,7 @@ def provider_setup(counts_run: bool = True) -> tuple[mp.ProviderConfig | None, o
             return None, None, "Enter the endpoint's base URL in the sidebar."
         try:
             net_guard.check_url(base)
-        except net_guard.BlockedURL as exc:
+        except ValueError as exc:      # BlockedURL, or a URL that can't be parsed
             return None, None, f"That base URL can't be used from this server: {exc}"
     return mp.ProviderConfig(provider=prov, api_key=key, model=model, base_url=base), None, ""
 
@@ -265,7 +265,9 @@ def fmt_screened(iso: str) -> str:
 
 
 def render_result(result: dict, profile: dict | None, paper_id: str,
-                  screened_at: str = ""):
+                  screened_at: str = "", profile_version: str = ""):
+    """profile_version is the version stamped on the record; the profile on disk
+    may have moved on since, so it wins over profile['profile_version']."""
     rec = result.get("overall_recommendation", "?")
     icon, color = REC_STYLE.get(rec, ("", "gray"))
     st.markdown(f"### {icon} :{color}[{rec}] &nbsp; · &nbsp; {paper_id}")
@@ -273,7 +275,8 @@ def render_result(result: dict, profile: dict | None, paper_id: str,
         st.caption(f"Screened {fmt_screened(screened_at)}")
     meta = [f"**Confidence:** {result.get('confidence_level', '?')}"]
     if profile:
-        meta.append(f"**Criteria:** {profile['profile_name']} v{profile['profile_version']}")
+        ver = profile_version or profile.get("profile_version", "?")
+        meta.append(f"**Criteria:** {profile['profile_name']} v{ver}")
     if result.get("_provider_model"):
         meta.append(f"**Model:** {result['_provider_model']}")
     st.markdown(" &nbsp; | &nbsp; ".join(meta))
@@ -292,7 +295,9 @@ def render_result(result: dict, profile: dict | None, paper_id: str,
     criteria_defs = (profile or {}).get("criteria") or [
         {"id": cid, "label": cid} for cid in crit]
     for idx, c in enumerate(criteria_defs, start=1):
-        block = crit.get(c["id"], {}) or {}
+        block = crit.get(c["id"])
+        if not isinstance(block, dict):
+            block = {}
         v = block.get("verdict", "?")
         opt = "" if c.get("required_for_include", True) else " (optional)"
         with st.container(border=True):
@@ -301,7 +306,8 @@ def render_result(result: dict, profile: dict | None, paper_id: str,
             tf = c.get("tag_field")
             if tf and tf.get("name") and block.get(tf["name"]):
                 vals = block[tf["name"]]
-                shown = ", ".join(vals) if isinstance(vals, list) else str(vals)
+                shown = (", ".join(str(v) for v in vals) if isinstance(vals, list)
+                         else str(vals))
                 st.markdown(f"*{tf.get('label') or tf['name']}:* {shown}")
             if block.get("reasoning"):
                 st.markdown(block["reasoning"])
@@ -377,10 +383,13 @@ def _profile_editor():
     if c1.button("Validate"):
         try:
             ok, errs = cp.validate_profile(json.loads(ss["editor_text"]))
-            (st.success("Profile is valid.") if ok
-             else st.error("\n".join(f"- {e}" for e in errs)))
         except json.JSONDecodeError as exc:
             st.error(f"Not valid JSON: {exc}")
+        else:
+            if ok:
+                st.success("Profile is valid.")
+            else:
+                st.error("Profile has problems:\n\n" + "\n".join(f"- {e}" for e in errs))
     if c2.button("Preview prompt"):
         try:
             prof = cp.normalize_profile(json.loads(ss["editor_text"]))
@@ -770,8 +779,11 @@ def tab_batch():
             if st.button("Remove all uploaded files"):
                 for p in uploads:
                     p.unlink(missing_ok=True)
-                ss["batch_files_seen"] = set()
+                # batch_files_seen is kept on purpose: the file picker above still
+                # holds these files, and forgetting them would save them right back.
                 st.rerun()
+            st.caption("To upload a file again after removing it, clear it from the "
+                       "file picker above (✕) and add it once more.")
 
     missing = [r.get("file_path") for r in rows
                if (r.get("file_path") or "").strip() and not WS.upload_path(r["file_path"])]
@@ -861,7 +873,8 @@ def tab_results():
         format_func=lambda pid: f"{pid}  ·  {fmt_screened(by_pid[pid].get('analyzed_at', ''))}")
     entry = by_pid[pick]
     prof = cp.load_profile(WS.root, entry.get("profile_id", ""))
-    render_result(entry.get("_full_result") or {}, prof, pick, entry.get("analyzed_at", ""))
+    render_result(entry.get("_full_result") or {}, prof, pick, entry.get("analyzed_at", ""),
+                  profile_version=str(entry.get("profile_version") or ""))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
