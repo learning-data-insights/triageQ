@@ -62,7 +62,7 @@ uploads and results.
 | A visitor's own API key | Server memory for that browser session only; never on disk | Tab closed or page refreshed |
 | Profiles, uploads, results | `/data/workspaces/<id>/` (a Docker volume) | After `TRIAGEQ_WORKSPACE_TTL_HOURS` (default 24) without use, or right away with **Clear my session** |
 | Demo-key usage counters | `/data/usage/<date>.json` | After 14 days |
-| Access log (IP, time, path, user agent) | `/data/access.log` in the `caddy-data` volume, one file per day | After 30 days (31 files kept) |
+| Access log (IP, time, path, user agent; no headers, and the `ws` workspace parameter is stripped from the path) | `/data/access.log` in the `caddy-data` volume, one file per day | After 30 days (31 files kept) |
 | Daily usage counts (no IPs) | the counts CSV on the host (see "Usage numbers") | Kept permanently |
 
 The app checks for expired workspaces every 30 minutes, so there's no cron job
@@ -326,8 +326,11 @@ sudo python3 scripts/usage_report.py --days 7      # one row per day: visitors, 
 ```
 
 The raw log holds IP addresses, so it rolls off at 30 days. The counts are kept for good
-in a CSV outside the checkout, appended once a night by cron on the host (root's
-crontab; add it at deploy time, it is not in the compose file):
+in a CSV outside the checkout, written once a night by cron on the host (root's
+crontab; add it at deploy time, it is not in the compose file). Each run recomputes the
+last seven days and rewrites any row that changed: a session is logged only when it
+closes, so one still open at 00:30 lands in its day's row on a later night. Rows older
+than seven days are never touched.
 
 ```bash
 sudo mkdir -p /home/ubuntu/triageq-usage

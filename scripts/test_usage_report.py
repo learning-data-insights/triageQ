@@ -92,17 +92,28 @@ class UsageReportTest(unittest.TestCase):
             self.assertNotIn(ip, out)
         self.assertNotIn("SecretAgent", out)
 
-    def test_append_once(self):
-        path = os.path.join(self.tmp.name, "out.csv")
-        args = ["--log-dir", self.logs, "--usage-dir", self.usage,
-                "--date", DAY, "--append", path]
+    def run_main(self, args):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            usage_report.main(args)
-            usage_report.main(args)
-        self.assertIn("already recorded", buf.getvalue())
+            code = usage_report.main(args)
+        return code, buf.getvalue()
+
+    def append_args(self, path):
+        return ["--log-dir", self.logs, "--usage-dir", self.usage,
+                "--date", DAY, "--append", path]
+
+    def read_rows(self, path):
         with open(path, newline="") as fh:
-            rows = list(csv.DictReader(fh))
+            return list(csv.DictReader(fh))
+
+    def test_append_once(self):
+        path = os.path.join(self.tmp.name, "out.csv")
+        args = self.append_args(path)
+        _, out1 = self.run_main(args)
+        _, out2 = self.run_main(args)
+        self.assertEqual(out1.strip(), "appended " + DAY)
+        self.assertEqual(out2.strip(), "unchanged " + DAY)
+        rows = self.read_rows(path)
         self.assertEqual(len(rows), 1)
         self.assertEqual(list(rows[0]), usage_report.CSV_COLUMNS)
         self.assertEqual(rows[0]["sessions"], "3")
@@ -110,6 +121,45 @@ class UsageReportTest(unittest.TestCase):
             text = fh.read()
         for ip in IPS:
             self.assertNotIn(ip, text)
+
+    def test_late_session_close_updates_row(self):
+        path = os.path.join(self.tmp.name, "out.csv")
+        args = self.append_args(path)
+        self.run_main(args)
+        # Closes the next day, started on DAY.
+        with open(os.path.join(self.logs, "access.log"), "a") as fh:
+            fh.write(entry(BASE + 86400 + 1800, IPS[1], "GET", "/_stcore/stream", 7200) + "\n")
+        _, out = self.run_main(args)
+        self.assertIn("updated " + DAY, out)
+        self.assertIn("sessions 3->4", out)
+        rows = [r for r in self.read_rows(path) if r["date"] == DAY]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sessions"], "4")
+
+    def test_window_carries_old_rows(self):
+        path = os.path.join(self.tmp.name, "out.csv")
+        old = "2026-09-01,5,6,7,2,3.5,1,9\n"
+        with open(path, "w", newline="") as fh:
+            fh.write(",".join(usage_report.CSV_COLUMNS) + "\r\n" + old.replace("\n", "\r\n"))
+        self.run_main(self.append_args(path))
+        with open(path, newline="") as fh:
+            lines = fh.read().split("\r\n")
+        rows = self.read_rows(path)
+        self.assertEqual([r["date"] for r in rows], ["2026-09-01", DAY])
+        self.assertEqual(lines[1], old.strip())
+
+    def test_header_mismatch_refuses(self):
+        path = os.path.join(self.tmp.name, "out.csv")
+        content = "date,foo\n2026-09-01,bar\n"
+        with open(path, "w", newline="") as fh:
+            fh.write(content)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            code, _ = self.run_main(self.append_args(path))
+        self.assertNotEqual(code, 0)
+        self.assertIn("header", buf.getvalue())
+        with open(path, newline="") as fh:
+            self.assertEqual(fh.read(), content)
 
 
 if __name__ == "__main__":

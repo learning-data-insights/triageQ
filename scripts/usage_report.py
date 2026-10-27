@@ -11,8 +11,12 @@ length in minutes, demo runs and model calls. Client IPs are used in memory
 to count distinct visitors and are never printed or written; user agents are
 never read.
 
-With --append PATH, appends one CSV row (default day: yesterday, UTC) unless
-that date is already in the file.
+With --append PATH, writes one CSV row per UTC day for the last --settle-days
+days ending yesterday, adding missing days and updating rows whose numbers
+changed. Streamlit sessions are logged only when they close and count toward
+the day they started, so a session still open at the nightly run shows up in
+a later run; the trailing window lets that late close land in the right row.
+Rows older than the window are never touched.
 """
 import argparse
 import csv
@@ -146,19 +150,39 @@ def format_table(rows):
     return "\n".join(lines)
 
 
-def append_row(path, row):
-    exists = os.path.exists(path) and os.path.getsize(path) > 0
-    if exists:
+def upsert_rows(path, rows):
+    """Add or update rows (keyed by date) in the CSV at path. Returns an exit code."""
+    existing = {}
+    if os.path.exists(path) and os.path.getsize(path) > 0:
         with open(path, newline="", encoding="utf-8") as fh:
-            if any(r.get("date") == row["date"] for r in csv.DictReader(fh)):
-                print("already recorded")
-                return
-    with open(path, "a", newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames != CSV_COLUMNS:
+                print(f"error: {path} has an unexpected header; refusing to modify it",
+                      file=sys.stderr)
+                return 1
+            for r in reader:
+                existing[r["date"]] = r
+    for row in sorted(rows, key=lambda r: r["date"]):
+        new = {c: str(row[c]) for c in CSV_COLUMNS}
+        old = existing.get(new["date"])
+        if old is None:
+            existing[new["date"]] = new
+            print(f"appended {new['date']}")
+        elif all(old[c] == new[c] for c in CSV_COLUMNS):
+            print(f"unchanged {new['date']}")
+        else:
+            changes = ", ".join(f"{c} {old[c]}->{new[c]}" for c in CSV_COLUMNS
+                                if old[c] != new[c])
+            existing[new["date"]] = new
+            print(f"updated {new['date']} ({changes})")
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=CSV_COLUMNS)
-        if not exists:
-            writer.writeheader()
-        writer.writerow(row)
-    print(f"appended {row['date']}")
+        writer.writeheader()
+        for d in sorted(existing):
+            writer.writerow(existing[d])
+    os.replace(tmp, path)
+    return 0
 
 
 def main(argv=None):
@@ -167,7 +191,13 @@ def main(argv=None):
     ap.add_argument("--usage-dir", default=DEFAULT_USAGE_DIR)
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--date", help="YYYY-MM-DD (UTC)")
-    ap.add_argument("--append", metavar="PATH")
+    ap.add_argument("--append", metavar="PATH",
+                    help="upsert one CSV row per day for the last --settle-days days "
+                         "ending yesterday (UTC); sessions are logged when they close, "
+                         "so re-computing the window lets a late close update its day")
+    ap.add_argument("--settle-days", type=int, default=7,
+                    help="with --append, how many days ending yesterday to recompute "
+                         "(default 7); --date limits it to that one day")
     args = ap.parse_args(argv)
 
     today = dt.datetime.now(dt.timezone.utc).date()
@@ -177,7 +207,11 @@ def main(argv=None):
         except ValueError:
             ap.error("--date must be YYYY-MM-DD")
     if args.append:
-        dates = [args.date or (today - dt.timedelta(days=1)).isoformat()]
+        if args.date:
+            dates = [args.date]
+        else:
+            dates = [(today - dt.timedelta(days=i)).isoformat()
+                     for i in range(args.settle_days, 0, -1)]
     elif args.date:
         dates = [args.date]
     else:
@@ -187,9 +221,8 @@ def main(argv=None):
     days = collect(args.log_dir)
     rows = [day_row(days, args.usage_dir, d) for d in dates]
     if args.append:
-        append_row(args.append, rows[0])
-    else:
-        print(format_table(rows))
+        return upsert_rows(args.append, rows)
+    print(format_table(rows))
     return 0
 
 
