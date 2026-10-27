@@ -6,6 +6,17 @@ chat history. Dates reflect when each round of work took place.
 
 ---
 
+## 1.3.3 — Hosted web build: access log notice
+**2026-10-27**
+
+Web build (`web_app.py`) only; the desktop app is unchanged.
+
+- **About page:** a new line under "Your data on this server" says the server keeps a
+  standard access log (IP address, time, pages requested) for 30 days plus up to a week in
+  server backups, and that it is used only to count visits. The log is Caddy's (see
+  `DEPLOY.md`, "Usage numbers"); request and response headers are not written and the `ws`
+  workspace parameter is stripped from logged paths, so a logged line cannot open a workspace
+
 ## 1.3.2 — Hosted web build: Validate crash and four smaller fixes
 **2026-10-09**
 

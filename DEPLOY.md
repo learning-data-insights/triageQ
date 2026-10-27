@@ -62,6 +62,8 @@ uploads and results.
 | A visitor's own API key | Server memory for that browser session only; never on disk | Tab closed or page refreshed |
 | Profiles, uploads, results | `/data/workspaces/<id>/` (a Docker volume) | After `TRIAGEQ_WORKSPACE_TTL_HOURS` (default 24) without use, or right away with **Clear my session** |
 | Demo-key usage counters | `/data/usage/<date>.json` | After 14 days |
+| Access log (IP, time, path, user agent; no headers, and the `ws` workspace parameter is stripped from the path) | `/data/access.log` in the `caddy-data` volume, one file per day | After 30 days (31 files kept) |
+| Daily usage counts (no IPs) | the counts CSV on the host (see "Usage numbers") | Kept permanently |
 
 The app checks for expired workspaces every 30 minutes, so there's no cron job
 to set up. Visitors keep their work with **Download all results (.zip)**.
@@ -313,6 +315,31 @@ All commands run in `~/triageQ` over SSH.
 | Purge expired workspaces now | `sudo docker compose exec app python web_backend.py cleanup` |
 | **Wipe every workspace now** | `sudo docker compose exec app sh -c 'rm -rf /data/workspaces/*'` |
 | Disk space | `df -h /` |
+
+**Usage numbers.** Caddy writes a JSON access log to `/data/access.log` in the
+`caddy-data` volume and rolls it daily (the `log` block in the Caddyfile; 31 files kept,
+30 days). `scripts/usage_report.py` reads it, plus the demo-key counters, and prints
+counts only, never an address:
+
+```bash
+sudo python3 scripts/usage_report.py --days 7      # one row per day: visitors, page loads, sessions, peak concurrent, median session, demo runs, model calls
+```
+
+The raw log holds IP addresses, so it rolls off at 30 days. The counts are kept for good
+in a CSV outside the checkout, written once a night by cron on the host (root's
+crontab; add it at deploy time, it is not in the compose file). Each run recomputes the
+last seven days and rewrites any row that changed: a session is logged only when it
+closes, so one still open at 00:30 lands in its day's row on a later night. Rows older
+than seven days are never touched.
+
+```bash
+sudo mkdir -p /home/ubuntu/triageq-usage
+( sudo crontab -l 2>/dev/null; echo "30 0 * * * cd /home/ubuntu/triageQ && /usr/bin/python3 scripts/usage_report.py --append /home/ubuntu/triageq-usage/daily-counts.csv" ) | sudo crontab -
+```
+
+After changing the Caddyfile, reload rather than restart so nobody is dropped:
+`sudo docker compose exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`
+then the same with `reload`.
 
 **Want a hard wipe every night**, whether or not a workspace is in use? Add a
 cron job on the server (this example runs at 04:00 UTC):

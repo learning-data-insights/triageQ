@@ -37,7 +37,7 @@ import pdf_resolver as pr
 import screening
 import web_backend as wb
 
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 HERE = Path(__file__).parent
 EXAMPLES_DIR = HERE / "criteria-profiles"
 ASSETS = HERE / "assets"
@@ -897,6 +897,9 @@ not a replacement for them.
 - Papers you screen are sent to the model provider you choose. Don't upload anything
   confidential.
 - Your own API key is held in memory for this session only and is never written to disk.
+- The server keeps a standard access log (your IP address, the time, and the pages
+  requested) for 30 days, plus up to a week in server backups. We use it only to count
+  visits.
 
 **Limits here:** {CFG.max_batch_rows} papers per run · {CFG.max_upload_mb} MB per file ·
 {CFG.max_workspace_mb} MB per workspace.

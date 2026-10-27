@@ -5,5 +5,29 @@
 	request_body {
 		max_size 60MB
 	}
+	# Access log (John, 2026-10-22: "can you do that all the time?"). JSON, one
+	# file per day in the caddy-data volume, kept 30 days (LDI's retention policy;
+	# the log holds IP addresses). scripts/usage_report.py turns it into counts.
+	# The filter keeps workspace links out of the log (Warren, PR #1 review): a
+	# live ?ws=<id> opens that workspace, so the ws query parameter is dropped
+	# from the URI and the request headers (Referer carries the full page URL)
+	# and response headers are not written at all. The report only needs ts,
+	# client_ip, method, uri and duration.
+	log {
+		output file /data/access.log {
+			roll_interval 24h
+			roll_keep 31
+			roll_keep_for 720h
+		}
+		format filter {
+			fields {
+				request>uri query {
+					delete ws
+				}
+				request>headers delete
+				resp_headers delete
+			}
+		}
+	}
 	reverse_proxy app:8501
 }
